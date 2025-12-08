@@ -59,12 +59,15 @@ export interface NotebookInfo {
   colabName?: string;
 }
 
+export type NotebookOrderBy = "name" | "createdTime desc" | "modifiedTime desc";
+export type NotebookListOrderBy = "name" | "createdTime" | "modifiedTime";
+
 /**
  * Query options for listing notebooks.
  */
 export interface NotebookQuery {
   pageSize?: number;
-  orderBy?: string;
+  orderBy?: NotebookOrderBy;
   query?: string;
 }
 
@@ -73,5 +76,7 @@ export interface NotebookQuery {
  */
 export interface ListOptions {
   limit?: number;
-  orderBy?: "name" | "createdTime" | "modifiedTime";
+  orderBy?: NotebookListOrderBy;
+  /** If true, fetch full notebook content to extract colabName (slower). Default: false */
+  enrich?: boolean;
 }

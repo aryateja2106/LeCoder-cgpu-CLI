@@ -1,6 +1,14 @@
 #!/usr/bin/env node
+
+// Polyfill fetch for Node.js environment
+if (!globalThis.fetch) {
+  const nodeFetch = await import("node-fetch");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  globalThis.fetch = nodeFetch.default as any;
+}
+
 import path from "node:path";
-import readline from "node:readline/promises";
+import readline from "node:readline";
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
@@ -28,6 +36,38 @@ import type { StatusInfo, RuntimeInfo } from "./utils/output-formatter.js";
 import { ErrorCode, ErrorCategory, formatError } from "./jupyter/error-handler.js";
 import { DriveClient } from "./drive/client.js";
 import { NotebookManager } from "./drive/notebook-manager.js";
+
+/**
+ * Parse Drive API errors and provide user-friendly guidance based on HTTP status codes.
+ * 
+ * @param error - The error object from a Drive API call
+ * @returns Formatted error message with actionable guidance
+ */
+function formatDriveError(error: unknown): string {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const debug = Boolean(process.env.LECODER_CGPU_DEBUG);
+  
+  // Check for specific HTTP status codes in error messages
+  if (errorMessage.includes("403") || errorMessage.toLowerCase().includes("forbidden")) {
+    return "Access forbidden (403). Your authentication may have expired.\nTry running the command again with --force-login to re-authenticate.";
+  }
+  
+  if (errorMessage.includes("404") || errorMessage.toLowerCase().includes("not found")) {
+    return "Notebook not found (404). Please verify the notebook ID is correct.\nYou can list available notebooks with: lecoder-cgpu notebook list";
+  }
+  
+  if (errorMessage.includes("429") || errorMessage.toLowerCase().includes("rate limit")) {
+    return "Rate limit exceeded (429). Google Drive API quota exhausted.\nPlease wait a few minutes and try again. Consider adding delays between operations.";
+  }
+  
+  // For other errors, provide the original message
+  if (debug) {
+    // In debug mode, include full stack trace
+    return error instanceof Error && error.stack ? error.stack : errorMessage;
+  }
+  
+  return errorMessage;
+}
 
 interface GlobalOptions {
   config?: string;
@@ -462,14 +502,14 @@ program
       
       // Check if already authenticated
       try {
-        existingSession = await auth.getAccessToken();
+        existingSession = await auth.getAccessToken(globalOptions.forceLogin);
       } catch {
         // No existing session, proceed with fresh authentication
         existingSession = undefined;
       }
 
-      // If session exists and --force not set, prompt for confirmation
-      if (existingSession && !options.force) {
+      // If session exists and neither --force nor --force-login is set, prompt for confirmation
+      if (existingSession && !options.force && !globalOptions.forceLogin) {
         console.log(
           chalk.yellow(
             `Currently authenticated as ${existingSession.account.label} <${existingSession.account.id}>`
@@ -483,20 +523,26 @@ program
             output: process.stdout,
           });
           
-          const answer = await rl.question(
-            "Re-authenticate? This will clear your current session. (y/N): "
-          );
-          rl.close();
-          
-          if (!answer.toLowerCase().match(/^y(es)?$/)) {
-            console.log(chalk.gray("Authentication cancelled."));
-            return;
+          try {
+            const answer = await new Promise<string>((resolve) => {
+              rl.question(
+                "Re-authenticate? This will clear your current session. (y/N): ",
+                resolve
+              );
+            });
+            
+            if (!answer.toLowerCase().match(/^y(es)?$/)) {
+              console.log(chalk.gray("Authentication cancelled."));
+              return;
+            }
+          } finally {
+            rl.close();
           }
         }
       }
 
-      // Clear existing session if any
-      if (existingSession) {
+      // Clear existing session if any (or if --force-login was used)
+      if (existingSession || globalOptions.forceLogin) {
         await auth.signOut();
       }
 
@@ -691,6 +737,7 @@ notebookCmd
   .description("List your Colab notebooks from Drive")
   .option("-n, --limit <number>", "Maximum number of notebooks to show", "50")
   .option("--order-by <field>", "Sort by: name, createdTime, modifiedTime", "modifiedTime")
+  .option("--enrich", "Fetch full notebook content to extract internal name (slower)")
   .option("--json", "Output as JSON")
   .action(async (options, cmd) => {
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
@@ -713,6 +760,7 @@ notebookCmd
         const notebooks = await notebookManager.listNotebooks({
           limit: Number.parseInt(options.limit, 10),
           orderBy: options.orderBy,
+          enrich: Boolean(options.enrich),
         });
         
         spinner?.succeed(`Found ${notebooks.length} notebooks`);
@@ -743,7 +791,8 @@ notebookCmd
         }
       } catch (error) {
         spinner?.fail("Failed to fetch notebooks");
-        throw error;
+        console.error(chalk.red("\n" + formatDriveError(error)));
+        process.exit(1);
       }
     });
   });
@@ -787,7 +836,8 @@ notebookCmd
         }
       } catch (error) {
         spinner?.fail("Failed to create notebook");
-        throw error;
+        console.error(chalk.red("\n" + formatDriveError(error)));
+        process.exit(1);
       }
     });
   });
@@ -823,14 +873,18 @@ notebookCmd
           output: process.stdout,
         });
         
-        const answer = await rl.question(
-          chalk.yellow(`Delete notebook "${notebook.name}"? (y/N): `)
-        );
-        rl.close();
-        
-        if (!answer.toLowerCase().match(/^y(es)?$/)) {
-          console.log(chalk.gray("Deletion cancelled"));
-          return;
+        try {
+          const promptText = chalk.yellow(`Delete notebook "${notebook.name}"? (y/N): `);
+          const answer = await new Promise<string>((resolve) => {
+            rl.question(promptText, resolve);
+          });
+          
+          if (!answer.toLowerCase().match(/^y(es)?$/)) {
+            console.log(chalk.gray("Deletion cancelled"));
+            return;
+          }
+        } finally {
+          rl.close();
         }
       }
       
@@ -848,7 +902,8 @@ notebookCmd
         }
       } catch (error) {
         spinner?.fail("Failed to delete notebook");
-        throw error;
+        console.error(chalk.red("\n" + formatDriveError(error)));
+        process.exit(1);
       }
     });
   });
@@ -909,7 +964,8 @@ notebookCmd
         }
       } catch (error) {
         spinner.fail("Failed to open notebook");
-        throw error;
+        console.error(chalk.red("\n" + formatDriveError(error)));
+        process.exit(1);
       }
     });
   });
@@ -1052,6 +1108,14 @@ async function runKernelMode(
     throw error;
   }
 
+  // Handle connection errors (WebSocket failures, reconnection issues, etc.)
+  connection.on("error", (error: Error) => {
+    console.error(chalk.red("\nConnection error:"), error.message);
+    if (process.env.LECODER_CGPU_DEBUG) {
+      console.error(error.stack);
+    }
+  });
+
   // Display connection info
   console.log(chalk.gray(`Kernel ID: ${connection.getKernelId()}`));
   console.log(chalk.gray(`Runtime: ${runtime.label}`));
@@ -1136,38 +1200,41 @@ async function runKernelMode(
 
   const promptUser = () => {
     const prompt = multiLineBuffer ? continuationPrompt : promptText();
-    rl.question(prompt).then(async (line) => {
-      if (line === undefined) {
-        // EOF
-        cleanup();
-        return;
-      }
+    rl.question(prompt, async (line) => {
+      try {
+        if (line === undefined) {
+          // EOF
+          cleanup();
+          return;
+        }
 
-      // Handle exit
-      if (!multiLineBuffer && (line.trim() === "exit" || line.trim() === "quit")) {
-        console.log(chalk.yellow("Exiting..."));
-        cleanup();
-        return;
-      }
+        // Handle exit
+        if (!multiLineBuffer && (line.trim() === "exit" || line.trim() === "quit")) {
+          console.log(chalk.yellow("Exiting..."));
+          cleanup();
+          return;
+        }
 
-      // Handle multi-line continuation
-      if (line.endsWith("\\")) {
-        multiLineBuffer += line.slice(0, -1) + "\n";
+        // Handle multi-line continuation
+        if (line.endsWith("\\")) {
+          multiLineBuffer += line.slice(0, -1) + "\n";
+          promptUser();
+          return;
+        }
+
+        const code = multiLineBuffer + line;
+        multiLineBuffer = "";
+
+        await executeCode(code);
         promptUser();
-        return;
+      } catch (error: unknown) {
+        const err = error as { code?: string };
+        if (err.code === "ERR_USE_AFTER_CLOSE") {
+          return;
+        }
+        console.error(chalk.red("REPL error:"), error);
+        cleanup();
       }
-
-      const code = multiLineBuffer + line;
-      multiLineBuffer = "";
-
-      await executeCode(code);
-      promptUser();
-    }).catch((error) => {
-      if (error.code === "ERR_USE_AFTER_CLOSE") {
-        return;
-      }
-      console.error(chalk.red("REPL error:"), error);
-      cleanup();
     });
   };
 

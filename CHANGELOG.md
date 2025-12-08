@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Session storage now logs a one-time warning when stored credentials are missing required Drive scopes, prompting re-authentication instead of silently invalidating sessions
+
 ## [0.4.0] - 2025-12-07
 
 ### BREAKING CHANGES

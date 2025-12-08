@@ -343,6 +343,9 @@ Authenticate or re-authenticate with Google Colab. Triggers the OAuth flow and o
 - `-f, --force` - Skip confirmation prompt if already authenticated
 - `--validate` - Verify credentials with a test API call to Colab
 
+**Global Option Interaction:**
+- `--force-login` - When used globally (e.g., `lecoder-cgpu --force-login auth`), always discards cached sessions and forces a fresh login, bypassing the confirmation prompt.
+
 **Examples:**
 ```bash
 # First-time authentication
@@ -350,6 +353,9 @@ lecoder-cgpu auth
 
 # Force re-authentication without prompt
 lecoder-cgpu auth --force
+
+# Use global --force-login to force fresh authentication
+lecoder-cgpu --force-login auth
 
 # Authenticate and validate credentials
 lecoder-cgpu auth --validate

@@ -1,14 +1,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { NotebookManager } from "../../src/drive/notebook-manager.js";
 import type { DriveClient } from "../../src/drive/client.js";
-import type { ColabClient } from "../../src/colab/client.js";
 import type { RuntimeManager } from "../../src/runtime/runtime-manager.js";
 import { Variant } from "../../src/colab/api.js";
 
 describe("NotebookManager", () => {
   let manager: NotebookManager;
   let mockDriveClient: Partial<DriveClient>;
-  let mockColabClient: Partial<ColabClient>;
 
   beforeEach(() => {
     mockDriveClient = {
@@ -48,17 +46,27 @@ describe("NotebookManager", () => {
       deleteNotebook: vi.fn().mockResolvedValue(undefined),
     };
 
-    mockColabClient = {};
-
     manager = new NotebookManager(
-      mockDriveClient as DriveClient,
-      mockColabClient as ColabClient
+      mockDriveClient as DriveClient
     );
   });
 
   describe("listNotebooks", () => {
-    it("should list notebooks with enriched metadata", async () => {
+    it("should list notebooks without enrichment by default (fast)", async () => {
       const result = await manager.listNotebooks();
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        id: "file1",
+        name: "notebook1.ipynb",
+      });
+      expect(result[0].colabName).toBeUndefined();
+      expect(mockDriveClient.listNotebooks).toHaveBeenCalled();
+      expect(mockDriveClient.getNotebookContent).not.toHaveBeenCalled();
+    });
+
+    it("should list notebooks with enriched metadata when enrich=true", async () => {
+      const result = await manager.listNotebooks({ enrich: true });
 
       expect(result).toHaveLength(1);
       expect(result[0]).toMatchObject({
@@ -67,6 +75,7 @@ describe("NotebookManager", () => {
         colabName: "Test Notebook",
       });
       expect(mockDriveClient.listNotebooks).toHaveBeenCalled();
+      expect(mockDriveClient.getNotebookContent).toHaveBeenCalled();
     });
 
     it("should apply list options", async () => {
@@ -81,12 +90,12 @@ describe("NotebookManager", () => {
       });
     });
 
-    it("should handle content fetch failures gracefully", async () => {
+    it("should handle content fetch failures gracefully when enrich=true", async () => {
       (mockDriveClient.getNotebookContent as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Content unavailable")
       );
 
-      const result = await manager.listNotebooks();
+      const result = await manager.listNotebooks({ enrich: true });
 
       expect(result).toHaveLength(1);
       expect(result[0].colabName).toBeUndefined();

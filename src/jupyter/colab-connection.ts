@@ -31,12 +31,18 @@ export interface ColabConnectionOptions {
   notebookPath?: string;
   /** Kernel name for session creation */
   kernelName?: string;
+  /** Timeout for kernel readiness check in ms */
+  kernelReadyTimeout?: number;
+  /** Poll interval for kernel readiness check in ms */
+  kernelReadyPollInterval?: number;
 }
 
 const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_RECONNECT_BASE_DELAY = 1000;
 const DEFAULT_NOTEBOOK_PATH = "/content/lecoder.ipynb";
 const DEFAULT_KERNEL_NAME = "python3";
+const DEFAULT_KERNEL_READY_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_KERNEL_READY_POLL_INTERVAL = 1000; // 1 second
 
 /**
  * Manages Jupyter kernel lifecycle and state for Colab connections
@@ -73,7 +79,65 @@ export class ColabConnection extends EventEmitter {
         options.reconnectBaseDelay ?? DEFAULT_RECONNECT_BASE_DELAY,
       notebookPath: options.notebookPath ?? DEFAULT_NOTEBOOK_PATH,
       kernelName: options.kernelName ?? DEFAULT_KERNEL_NAME,
+      kernelReadyTimeout:
+        options.kernelReadyTimeout ?? DEFAULT_KERNEL_READY_TIMEOUT,
+      kernelReadyPollInterval:
+        options.kernelReadyPollInterval ?? DEFAULT_KERNEL_READY_POLL_INTERVAL,
     };
+  }
+
+  /**
+   * Wait for kernel to be ready by polling its status
+   */
+  private async waitForKernelReady(): Promise<void> {
+    if (!this.kernelId) {
+      throw new Error("Kernel ID not set. Initialize session first.");
+    }
+
+    const startTime = Date.now();
+    const timeout = this.options.kernelReadyTimeout;
+    const pollInterval = this.options.kernelReadyPollInterval;
+
+    if (process.env.LECODER_CGPU_DEBUG) {
+      console.log(
+        `Waiting for kernel ${this.kernelId} to be ready (timeout: ${timeout}ms, poll interval: ${pollInterval}ms)`
+      );
+    }
+
+    while (Date.now() - startTime < timeout) {
+      try {
+        const kernel = await this.getStatus();
+        
+        if (process.env.LECODER_CGPU_DEBUG) {
+          console.log(
+            `Kernel ${this.kernelId} status: ${kernel.executionState}, connections: ${kernel.connections}`
+          );
+        }
+
+        // Kernel is ready when it's in a stable state and can accept connections
+        // Typical states: "idle" (ready), "busy" (executing), "starting" (initializing)
+        if (kernel.executionState === "idle" || kernel.executionState === "busy") {
+          if (process.env.LECODER_CGPU_DEBUG) {
+            console.log(`Kernel ${this.kernelId} is ready for WebSocket connection`);
+          }
+          return;
+        }
+
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      } catch (error) {
+        if (process.env.LECODER_CGPU_DEBUG) {
+          console.warn(`Error checking kernel status: ${error}`);
+        }
+        
+        // Continue polling on transient errors
+        await new Promise(resolve => setTimeout(resolve, pollInterval));
+      }
+    }
+
+    throw new Error(
+      `Kernel ${this.kernelId} failed to become ready within ${timeout}ms`
+    );
   }
 
   /**
@@ -91,6 +155,9 @@ export class ColabConnection extends EventEmitter {
         console.log(`Session created: ${this.session.id}`);
         console.log(`Kernel ID: ${this.kernelId}`);
       }
+
+      // Wait for kernel to be ready before attempting WebSocket connection
+      await this.waitForKernelReady();
 
       // Connect the kernel client
       await this.connectKernelClient();
@@ -231,6 +298,9 @@ export class ColabConnection extends EventEmitter {
         this.kernelClient.removeAllListeners();
         this.kernelClient.close();
       }
+
+      // Wait for kernel to be ready before attempting WebSocket connection
+      await this.waitForKernelReady();
 
       // Reconnect
       await this.connectKernelClient();

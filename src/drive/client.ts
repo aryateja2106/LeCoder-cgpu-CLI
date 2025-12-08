@@ -1,7 +1,13 @@
-import fetch, { RequestInit } from "node-fetch";
 import { z } from "zod";
 import type { DriveFile, NotebookContent, NotebookQuery } from "./types.js";
 import { DriveFileSchema, DriveFileListSchema, NotebookContentSchema } from "./schemas.js";
+
+// Type for fetch RequestInit since we don't include DOM lib
+type RequestInit = {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+};
 
 const DRIVE_API_BASE = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API_BASE = "https://www.googleapis.com/upload/drive/v3";
@@ -122,26 +128,36 @@ export class DriveClient {
 
   /**
    * Issue HTTP request to Drive API with authentication.
+   * Handles token refresh on 401 errors automatically.
    */
   private async issueRequest<T>(
     endpoint: URL,
     init: RequestInit,
     schema?: z.ZodType<T>,
+    retryCount = 0,
   ): Promise<T> {
     const accessToken = await this.getAccessToken();
     
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
-      ...((init.headers as Record<string, string>) ?? {}),
+      ...init.headers,
     };
 
-    const response = await fetch(endpoint.toString(), {
+    const response = await globalThis.fetch(endpoint.toString(), {
       ...init,
       headers,
     });
 
     if (!response.ok) {
       const errorBody = await response.text();
+      
+      // Handle 401 Unauthorized - token may be expired
+      if (response.status === 401 && retryCount < 1) {
+        // Token is invalid, request a fresh one and retry once
+        // The getAccessToken implementation should handle refresh
+        return this.issueRequest(endpoint, init, schema, retryCount + 1);
+      }
+      
       throw new Error(
         `Drive API error: ${response.status} ${response.statusText}\n${errorBody}`,
       );

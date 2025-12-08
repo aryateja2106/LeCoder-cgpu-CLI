@@ -32,8 +32,8 @@ describe('Package Information', () => {
     expect(pkg.default.version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it('should have Apache-2.0 license', async () => {
+  it('should have MIT license', async () => {
     const pkg = await import('../../package.json', { assert: { type: 'json' } });
-    expect(pkg.default.license).toBe('Apache-2.0');
+    expect(pkg.default.license).toBe('MIT');
   });
 });

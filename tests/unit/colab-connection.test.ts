@@ -126,6 +126,60 @@ describe("ColabConnection", () => {
       await expect(connection.initialize()).rejects.toThrow("Connection failed");
       expect(connection.getState()).toBe(ConnectionState.FAILED);
     });
+
+    it("should wait for kernel to be ready before connecting", async () => {
+      // Mock getKernel to simulate kernel starting up
+      let callCount = 0;
+      (mockColabClient.getKernel as any).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          // First call: kernel is still starting
+          return Promise.resolve({
+            id: "kernel-456",
+            name: "python3",
+            lastActivity: "2024-01-01T00:00:00Z",
+            executionState: "starting",
+            connections: 0,
+          });
+        } else {
+          // Subsequent calls: kernel is ready
+          return Promise.resolve({
+            id: "kernel-456",
+            name: "python3",
+            lastActivity: "2024-01-01T00:00:00Z",
+            executionState: "idle",
+            connections: 1,
+          });
+        }
+      });
+
+      await connection.initialize();
+
+      // Should have called getKernel multiple times while polling
+      expect(mockColabClient.getKernel).toHaveBeenCalled();
+      expect(connection.getState()).toBe(ConnectionState.CONNECTED);
+    });
+
+    it("should timeout if kernel fails to become ready", async () => {
+      // Mock getKernel to always return starting state
+      (mockColabClient.getKernel as any).mockResolvedValue({
+        id: "kernel-456",
+        name: "python3",
+        lastActivity: "2024-01-01T00:00:00Z",
+        executionState: "starting",
+        connections: 0,
+      });
+
+      const connection = new ColabConnection(mockRuntime, mockColabClient, {
+        kernelReadyTimeout: 100, // Very short timeout for testing
+        kernelReadyPollInterval: 10,
+      });
+
+      await expect(connection.initialize()).rejects.toThrow(
+        "failed to become ready within"
+      );
+      expect(connection.getState()).toBe(ConnectionState.FAILED);
+    });
   });
 
   describe("getKernelClient", () => {
@@ -264,6 +318,13 @@ describe("ColabConnection - options", () => {
         path: "/custom/path.ipynb",
         type: "notebook",
       }),
+      getKernel: vi.fn().mockResolvedValue({
+        id: "kernel-456",
+        name: "python3",
+        lastActivity: "2024-01-01T00:00:00Z",
+        executionState: "idle",
+        connections: 1,
+      }),
     } as unknown as ColabClient;
 
     const connection = new ColabConnection(mockRuntime, mockColabClient, {
@@ -306,6 +367,13 @@ describe("ColabConnection - options", () => {
         path: "/content/notebook.ipynb",
         type: "notebook",
       }),
+      getKernel: vi.fn().mockResolvedValue({
+        id: "kernel-456",
+        name: "python3",
+        lastActivity: "2024-01-01T00:00:00Z",
+        executionState: "idle",
+        connections: 1,
+      }),
     } as unknown as ColabClient;
 
     const connection = new ColabConnection(mockRuntime, mockColabClient, {
@@ -320,5 +388,51 @@ describe("ColabConnection - options", () => {
       "https://example.com",
       "test-token"
     );
+  });
+
+  it("should use custom kernel readiness options", async () => {
+    const mockRuntime: AssignedRuntime = {
+      label: "Colab GPU T4",
+      accelerator: "T4",
+      endpoint: "test-endpoint",
+      proxy: {
+        url: "https://example.com",
+        token: "test-token",
+        tokenExpiresInSeconds: 3600,
+      },
+    };
+
+    const mockColabClient = {
+      createSession: vi.fn().mockResolvedValue({
+        id: "session-123",
+        kernel: {
+          id: "kernel-456",
+          name: "python3",
+          lastActivity: "2024-01-01T00:00:00Z",
+          executionState: "idle",
+          connections: 1,
+        },
+        name: "/content/notebook.ipynb",
+        path: "/content/notebook.ipynb",
+        type: "notebook",
+      }),
+      getKernel: vi.fn().mockResolvedValue({
+        id: "kernel-456",
+        name: "python3",
+        lastActivity: "2024-01-01T00:00:00Z",
+        executionState: "idle",
+        connections: 1,
+      }),
+    } as unknown as ColabClient;
+
+    const connection = new ColabConnection(mockRuntime, mockColabClient, {
+      kernelReadyTimeout: 60000,
+      kernelReadyPollInterval: 500,
+    });
+
+    await connection.initialize();
+
+    // Should have used the custom timeout and poll interval
+    expect(mockColabClient.createSession).toHaveBeenCalled();
   });
 });

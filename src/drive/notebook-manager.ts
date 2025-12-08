@@ -1,7 +1,12 @@
 import type { RuntimeManager } from "../runtime/runtime-manager.js";
 import { Variant } from "../colab/api.js";
 import { DriveClient } from "./client.js";
-import type { NotebookInfo, ListOptions, NotebookContent } from "./types.js";
+import type {
+  NotebookInfo,
+  ListOptions,
+  NotebookContent,
+  NotebookOrderBy,
+} from "./types.js";
 import { getDefaultTemplate, getGpuTemplate, getTpuTemplate } from "./templates.js";
 
 /**
@@ -13,9 +18,11 @@ export class NotebookManager {
 
   /**
    * List notebooks with formatted output.
+   * By default, returns only Drive metadata (fast).
+   * Set options.enrich=true to fetch full notebook content for colabName (slower).
    */
   async listNotebooks(options?: ListOptions): Promise<NotebookInfo[]> {
-    const orderByMap: Record<string, string> = {
+    const orderByMap: Record<NonNullable<ListOptions["orderBy"]>, NotebookOrderBy> = {
       name: "name",
       createdTime: "createdTime desc",
       modifiedTime: "modifiedTime desc",
@@ -29,7 +36,18 @@ export class NotebookManager {
       orderBy,
     });
 
-    // Convert to NotebookInfo with enriched metadata
+    // If enrich flag is not set, construct NotebookInfo directly from DriveFile entries
+    if (!options?.enrich) {
+      return files.map(file => ({
+        id: file.id,
+        name: file.name,
+        createdTime: file.createdTime,
+        modifiedTime: file.modifiedTime,
+        webViewLink: file.webViewLink,
+      }));
+    }
+
+    // Only fetch full content when enrich=true to extract colabName
     const notebooks: NotebookInfo[] = [];
     for (const file of files) {
       try {
