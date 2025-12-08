@@ -50,6 +50,11 @@ export interface HistoryStats {
   newestEntry?: Date;
 }
 
+interface ExecutionHistoryOptions {
+  historyPath?: string;
+  baseDir?: string;
+}
+
 /**
  * Manages persistent execution history storage
  */
@@ -58,9 +63,9 @@ export class ExecutionHistoryStorage {
   private readonly maxFileSize = 10 * 1024 * 1024; // 10MB
   private readonly maxEntries = 1000;
 
-  constructor() {
-    const configDir = path.join(homedir(), ".config", "lecoder-cgpu", "state");
-    this.historyPath = path.join(configDir, "history.jsonl");
+  constructor(options?: ExecutionHistoryOptions) {
+    const configDir = options?.baseDir ?? path.join(homedir(), ".config", "lecoder-cgpu", "state");
+    this.historyPath = options?.historyPath ?? path.join(configDir, "history.jsonl");
   }
 
   /**

@@ -9,6 +9,7 @@ import {
 } from "../colab/client.js";
 import { RuntimeProxyInfo, Variant } from "../colab/api.js";
 import { ColabConnection } from "../jupyter/colab-connection.js";
+import { getFileLogger } from "../utils/file-logger.js";
 
 export interface AssignedRuntime {
   label: string;
@@ -39,19 +40,25 @@ export class RuntimeManager {
   async assignRuntime(
     options: AssignRuntimeOptions = {},
   ): Promise<AssignedRuntime> {
+    const logger = getFileLogger();
     const variant = options.variant ?? Variant.GPU;
     const quiet = options.quiet ?? false;
+    logger?.debug("RUNTIME", "Assigning runtime", { variant, forceNew: options.forceNew });
+    
     if (!options.forceNew) {
       const reused = await this.tryReuseExistingRuntime(variant, quiet);
       if (reused) {
+        logger?.logRuntime("assign", { variant, accelerator: reused.accelerator, reused: true });
         return reused;
       }
     }
-    return this.requestFreshAssignment({
+    const runtime = await this.requestFreshAssignment({
       allowFallbackToReuse: !options.forceNew,
       variant,
       quiet,
     });
+    logger?.logRuntime("assign", { variant, accelerator: runtime.accelerator, reused: false });
+    return runtime;
   }
 
   private async requestFreshAssignment({

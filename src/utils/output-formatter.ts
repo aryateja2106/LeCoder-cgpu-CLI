@@ -23,6 +23,19 @@ export interface StatusInfo {
   };
   eligibleGpus: string[];
   runtimes: RuntimeInfo[];
+  sessions?: {
+    total: number;
+    active: number;
+    connected: number;
+    stale: number;
+    max: number;
+    tier: string;
+    activeSession?: {
+      id: string;
+      label: string;
+      runtime: string;
+    };
+  };
 }
 
 /**

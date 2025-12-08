@@ -3,8 +3,7 @@
 // Polyfill fetch for Node.js environment
 if (!globalThis.fetch) {
   const nodeFetch = await import("node-fetch");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  globalThis.fetch = nodeFetch.default as any;
+  globalThis.fetch = nodeFetch.default as unknown as typeof fetch;
 }
 
 import path from "node:path";
@@ -25,7 +24,7 @@ import { Variant } from "./colab/api.js";
 import { uploadFileToRuntime } from "./runtime/file-transfer.js";
 import { startServeServer } from "./serve/server.js";
 import { KNOWN_GEMINI_MODELS } from "./serve/utils.js";
-import { ColabConnection } from "./jupyter/colab-connection.js";
+import type { ColabConnection } from "./jupyter/colab-connection.js";
 import { ReplyStatus } from "./jupyter/protocol.js";
 import type { ExecutionResult } from "./jupyter/protocol.js";
 import { queryGpuInfo, formatMemory, calculateMemoryUsage } from "./runtime/gpu-info.js";
@@ -36,6 +35,20 @@ import type { StatusInfo, RuntimeInfo } from "./utils/output-formatter.js";
 import { ErrorCode, ErrorCategory, formatError } from "./jupyter/error-handler.js";
 import { DriveClient } from "./drive/client.js";
 import { NotebookManager } from "./drive/notebook-manager.js";
+import { SessionStorage } from "./session/session-storage.js";
+import { SessionManager, type EnrichedSession, type SessionStats } from "./session/session-manager.js";
+import { ConnectionPool } from "./jupyter/connection-pool.js";
+import { initFileLogger, LogLevel } from "./utils/file-logger.js";
+
+// Modular command handlers are available in ./commands/ but not yet integrated
+// TODO: Refactor command actions to use these handlers to reduce cognitive complexity
+
+// Prevent EPIPE errors when piping output (e.g. to head/tail)
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") {
+    process.exit(0);
+  }
+});
 
 /**
  * Parse Drive API errors and provide user-friendly guidance based on HTTP status codes.
@@ -72,6 +85,7 @@ function formatDriveError(error: unknown): string {
 interface GlobalOptions {
   config?: string;
   forceLogin?: boolean;
+  session?: string;
 }
 
 interface ConnectCommandOptions extends GlobalOptions {
@@ -100,6 +114,17 @@ interface CopyCommandOptions extends GlobalOptions {
 
 async function createApp(configPath?: string) {
   const config = await loadConfig(configPath);
+  
+  // Initialize file logger for debugging
+  // Default to DEBUG level for file logs (useful for troubleshooting)
+  // Console output only shown in debug mode
+  const logsDir = path.join(config.storageDir, "logs");
+  const logger = initFileLogger(logsDir, {
+    minLevel: LogLevel.DEBUG,
+    consoleOutput: Boolean(process.env.LECODER_CGPU_DEBUG),
+  });
+  logger.info("CLI", "Application started", { configPath, storageDir: config.storageDir });
+  
   const storage = new FileAuthStorage(config.storageDir);
   const oauthClient = new OAuth2Client(config.clientId, config.clientSecret);
   const auth = new GoogleOAuthManager(oauthClient, storage);
@@ -110,7 +135,11 @@ async function createApp(configPath?: string) {
   );
   const driveClient = new DriveClient(async () => (await auth.getAccessToken()).accessToken);
   const notebookManager = new NotebookManager(driveClient);
-  return { auth, colabClient, driveClient, notebookManager, config };
+  const sessionStorage = new SessionStorage(config.storageDir);
+  const connectionPool = ConnectionPool.getInstance();
+  const runtimeManager = new RuntimeManager(colabClient);
+  const sessionManager = new SessionManager(sessionStorage, runtimeManager, colabClient, connectionPool);
+  return { auth, colabClient, driveClient, notebookManager, config, sessionManager, runtimeManager, connectionPool, logger };
 }
 
 const program = new Command();
@@ -118,7 +147,8 @@ program
   .name("lecoder-cgpu")
   .description("LeCoder cGPU - Robust CLI for Google Colab GPU access")
   .option("-c, --config <path>", "path to config file")
-  .option("--force-login", "ignore cached session");
+  .option("--force-login", "ignore cached session")
+  .option("-s, --session <id>", "target a specific session by ID");
 
 program
   .command("connect")
@@ -145,19 +175,27 @@ program
   .action(async (_args, cmd) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const connectOptions = (cmd.opts() as ConnectCommandOptions) ?? {};
-    await withApp(globalOptions, async ({ auth, colabClient }) => {
-      const session = await auth.getAccessToken(globalOptions.forceLogin);
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager }) => {
+      const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       console.log(
         chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
+          `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
         ),
       );
-      const runtimeManager = new RuntimeManager(colabClient);
-      const runtime = await runtimeManager.assignRuntime({
+      
+      // Validate conflicting options
+      if (globalOptions.session && (connectOptions.newRuntime || connectOptions.tpu || connectOptions.cpu)) {
+        throw new Error("Cannot use --session with --new-runtime, --tpu, or --cpu flags");
+      }
+      
+      // Get or create session
+      const variant = resolveVariant(connectOptions);
+      const session = await sessionManager.getOrCreateSession(globalOptions.session, {
+        variant,
         forceNew: Boolean(connectOptions.newRuntime),
-        variant: resolveVariant(connectOptions),
       });
-
+      
+      const runtime = session.runtime;
       const mode = connectOptions.mode ?? "terminal";
 
       if (mode === "kernel") {
@@ -205,24 +243,31 @@ program
     const runOptions = options ?? {};
     const mode = runOptions.mode || "terminal";
     
-    await withApp(globalOptions, async ({ auth, colabClient }) => {
-      const session = await auth.getAccessToken(globalOptions.forceLogin);
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager }) => {
+      const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       const jsonMode = Boolean(runOptions.json);
       
       if (!jsonMode) {
         console.log(
           chalk.green(
-            `Authenticated as ${session.account.label} <${session.account.id}>`,
+            `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
           ),
         );
       }
       
-      const runtimeManager = new RuntimeManager(colabClient);
-      const runtime = await runtimeManager.assignRuntime({
+      // Validate conflicting options
+      if (globalOptions.session && (runOptions.newRuntime || runOptions.tpu || runOptions.cpu)) {
+        throw new Error("Cannot use --session with --new-runtime, --tpu, or --cpu flags");
+      }
+      
+      // Get or create session
+      const variant = resolveVariant(runOptions);
+      const session = await sessionManager.getOrCreateSession(globalOptions.session, {
+        variant,
         forceNew: Boolean(runOptions.newRuntime),
-        variant: resolveVariant(runOptions),
-        quiet: !runOptions.verbose || jsonMode,
       });
+      
+      const runtime = session.runtime;
       
       const historyStorage = new ExecutionHistoryStorage();
       
@@ -312,19 +357,27 @@ program
   ) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const copyOptions = options ?? {};
-    await withApp(globalOptions, async ({ auth, colabClient }) => {
-      const session = await auth.getAccessToken(globalOptions.forceLogin);
+    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+      const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       console.log(
         chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
+          `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
         ),
       );
-      const runtimeManager = new RuntimeManager(colabClient);
-      const runtime = await runtimeManager.assignRuntime({
+      
+      // Validate conflicting options
+      if (globalOptions.session && (copyOptions.newRuntime || copyOptions.tpu || copyOptions.cpu)) {
+        throw new Error("Cannot use --session with --new-runtime, --tpu, or --cpu flags");
+      }
+      
+      // Get or create session
+      const variant = resolveVariant(copyOptions);
+      const session = await sessionManager.getOrCreateSession(globalOptions.session, {
+        variant,
         forceNew: Boolean(copyOptions.newRuntime),
-        variant: resolveVariant(copyOptions),
-        quiet: true,
       });
+      
+      const runtime = session.runtime;
       const result = await uploadFileToRuntime({
         runtime,
         localPath: source,
@@ -338,14 +391,43 @@ program
 
 program
   .command("status")
-  .description("Show authentication status and active runtime details")
+  .description("Show authentication status, active runtime details, and sessions")
   .option("--json", "Output status as JSON for machine parsing")
   .action(async (cmdOptions, cmd) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const jsonMode = Boolean(cmdOptions.json);
-    await withApp(globalOptions, async ({ auth, colabClient }) => {
+    const targetSessionId = globalOptions.session;
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
       const ccu = await colabClient.getCcuInfo();
+      let targetSession: EnrichedSession | undefined;
+
+      if (targetSessionId) {
+        try {
+          const sessions = await sessionManager.listSessions();
+          
+          // Try exact match first
+          targetSession = sessions.find((s) => s.id === targetSessionId);
+          
+          // If not found, try prefix match
+          if (!targetSession && targetSessionId.length >= 4) {
+            const matches = sessions.filter((s) => s.id.startsWith(targetSessionId));
+            if (matches.length === 1) {
+              targetSession = matches[0];
+            } else if (matches.length > 1) {
+              const matchIds = matches.map(s => s.id.substring(0, 8)).join(", ");
+              throw new Error(`Ambiguous session ID "${targetSessionId}". Matches: ${matchIds}`);
+            }
+          }
+
+          if (!targetSession) {
+            throw new Error(`Session not found: ${targetSessionId}`);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`Unable to load session ${targetSessionId}: ${message}`);
+        }
+      }
       
       // Collect status information
       const statusInfo: StatusInfo = {
@@ -357,12 +439,56 @@ program
         eligibleGpus: ccu.eligibleGpus,
         runtimes: [],
       };
+
+      // Collect session statistics
+      let sessionStats: SessionStats | undefined;
+      let activeSessionDetails: { id: string; label: string; runtime: string } | undefined;
+      try {
+        sessionStats = await sessionManager.getStats();
+        const sessions = await sessionManager.listSessions();
+        const activeSess = sessions.find((s) => s.isActive);
+        
+        statusInfo.sessions = {
+          total: sessionStats.totalSessions,
+          active: sessionStats.activeSessions,
+          connected: sessionStats.connectedSessions,
+          stale: sessionStats.staleSessions,
+          max: sessionStats.maxSessions,
+          tier: sessionStats.tier,
+        };
+
+        if (activeSess) {
+          activeSessionDetails = {
+            id: activeSess.id,
+            label: activeSess.label,
+            runtime: activeSess.runtime.label,
+          };
+          statusInfo.sessions.activeSession = activeSessionDetails;
+        }
+      } catch (error) {
+        // Session info unavailable (e.g. storage error), continue without it
+        if (process.env.LECODER_CGPU_DEBUG && !jsonMode) {
+           console.error(chalk.yellow("Warning: Could not fetch session stats"), error);
+        }
+      }
       
       // Check for active runtimes
       try {
         const assignments = await colabClient.listAssignments();
+        const assignmentsToInspect = targetSession
+          ? assignments.filter((assignment) => assignment.endpoint === targetSession.runtime.endpoint)
+          : assignments;
+
+        if (targetSession && assignmentsToInspect.length === 0) {
+          statusInfo.runtimes.push({
+            label: targetSession.runtime.label,
+            endpoint: targetSession.runtime.endpoint,
+            accelerator: targetSession.runtime.accelerator,
+            connected: false,
+          });
+        }
         
-        for (const assignment of assignments) {
+        const runtimePromises = assignmentsToInspect.map(async (assignment) => {
           const runtimeLabel = `Colab ${assignment.variant} ${assignment.accelerator}`;
           const runtimeInfo: RuntimeInfo = {
             label: runtimeLabel,
@@ -427,9 +553,11 @@ program
           } catch {
             // Connection failed, runtimeInfo.connected is already false
           }
+          return runtimeInfo;
+        });
 
-          statusInfo.runtimes.push(runtimeInfo);
-        }
+        const results = await Promise.all(runtimePromises);
+        statusInfo.runtimes.push(...results);
       } catch (error) {
         // Gracefully handle errors fetching assignments
         if (process.env.LECODER_CGPU_DEBUG && !jsonMode) {
@@ -450,6 +578,13 @@ program
         console.log(
           `  Eligible GPUs: ${ccu.eligibleGpus.join(", ")}`,
         );
+        if (targetSession) {
+          console.log(
+            chalk.gray(
+              `  Showing runtimes for session ${targetSession.id.substring(0, 8)} (${targetSession.label})`,
+            ),
+          );
+        }
         
         if (statusInfo.runtimes.length === 0) {
           console.log(chalk.gray("\nNo active runtimes"));
@@ -486,6 +621,24 @@ program
           
           console.log(chalk.bold("└─"));
         }
+        
+        // Show session information
+        if (sessionStats) {
+          console.log(chalk.bold("\nSessions:"));
+          console.log(`  Total: ${sessionStats.totalSessions} / ${sessionStats.maxSessions} (${sessionStats.tier} tier)`);
+          
+          if (activeSessionDetails) {
+            console.log(`  Active Session: ${chalk.bold(activeSessionDetails.id.substring(0, 8))} (${activeSessionDetails.label})`);
+          }
+
+          if (sessionStats.totalSessions > 0) {
+            console.log(`  ${chalk.green("●")} Active: ${sessionStats.activeSessions}`);
+            console.log(`  ${chalk.blue("●")} Connected: ${sessionStats.connectedSessions}`);
+            if (sessionStats.staleSessions > 0) {
+              console.log(`  ${chalk.red("●")} Stale: ${sessionStats.staleSessions} (run 'lecoder-cgpu sessions clean' to remove)`);
+            }
+          }
+        }
       }
     });
   });
@@ -498,7 +651,7 @@ program
   .action(async (options, cmd) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     await withApp(globalOptions, async ({ auth, colabClient }) => {
-      let existingSession;
+      let existingSession: Awaited<ReturnType<typeof auth.getAccessToken>> | undefined;
       
       // Check if already authenticated
       try {
@@ -531,7 +684,8 @@ program
               );
             });
             
-            if (!answer.toLowerCase().match(/^y(es)?$/)) {
+            const yesPattern = /^y(es)?$/;
+            if (!yesPattern.exec(answer.toLowerCase())) {
               console.log(chalk.gray("Authentication cancelled."));
               return;
             }
@@ -614,10 +768,10 @@ program
     // Handle clear flag
     if (options.clear) {
       await historyStorage.clear();
-      if (!options.json) {
-        console.log(chalk.green("✓ Execution history cleared"));
-      } else {
+      if (options.json) {
         console.log(JSON.stringify({ cleared: true }));
+      } else {
+        console.log(chalk.green("✓ Execution history cleared"));
       }
       return;
     }
@@ -712,7 +866,14 @@ program
 
       for (const entry of entries) {
         const timestamp = entry.timestamp.toISOString().replace("T", " ").substring(0, 19);
-        const statusIcon = entry.status === ReplyStatus.OK ? chalk.green("✓") : entry.status === ReplyStatus.ERROR ? chalk.red("✗") : chalk.yellow("⚠");
+        let statusIcon: string;
+        if (entry.status === ReplyStatus.OK) {
+          statusIcon = chalk.green("✓");
+        } else if (entry.status === ReplyStatus.ERROR) {
+          statusIcon = chalk.red("✗");
+        } else {
+          statusIcon = chalk.yellow("⚠");
+        }
         const mode = entry.mode === "kernel" ? "K" : "T";
         const command = entry.command.length > 50 ? entry.command.substring(0, 47) + "..." : entry.command;
         const duration = entry.timing ? `${entry.timing.duration_ms}ms` : "N/A";
@@ -879,7 +1040,8 @@ notebookCmd
             rl.question(promptText, resolve);
           });
           
-          if (!answer.toLowerCase().match(/^y(es)?$/)) {
+          const yesPattern = /^y(es)?$/;
+          if (!yesPattern.exec(answer.toLowerCase())) {
             console.log(chalk.gray("Deletion cancelled"));
             return;
           }
@@ -920,27 +1082,51 @@ notebookCmd
   .action(async (id: string, options, cmd) => {
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
     
-    await withApp(globalOptions, async ({ auth, notebookManager, colabClient }) => {
-      const session = await auth.getAccessToken(globalOptions.forceLogin);
+    await withApp(globalOptions, async ({ auth, notebookManager, colabClient, sessionManager, runtimeManager }) => {
+      const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       console.log(
         chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
+          `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
         ),
       );
       
       const spinner = ora("Opening notebook...").start();
       
       try {
-        const runtimeManager = new RuntimeManager(colabClient);
+        let variantStr: "tpu" | "cpu" | "gpu";
+        if (options.tpu) {
+          variantStr = "tpu";
+        } else if (options.cpu) {
+          variantStr = "cpu";
+        } else {
+          variantStr = "gpu";
+        }
         
-        const { notebook, runtime } = await notebookManager.openNotebook(
+        let variantEnum: Variant;
+        if (variantStr === "tpu") {
+          variantEnum = Variant.TPU;
+        } else if (variantStr === "cpu") {
+          variantEnum = Variant.DEFAULT;
+        } else {
+          variantEnum = Variant.GPU;
+        }
+        
+        // Get or create session
+        const session = await sessionManager.getOrCreateSession(globalOptions.session, {
+          variant: variantEnum,
+          forceNew: Boolean(options.newRuntime),
+        });
+        
+        const { notebook } = await notebookManager.openNotebook(
           id,
           runtimeManager,
           {
             forceNew: Boolean(options.newRuntime),
-            variant: options.tpu ? "tpu" : options.cpu ? "cpu" : "gpu",
+            variant: variantStr,
           }
         );
+        
+        const runtime = session.runtime;
         
         spinner.succeed(`Opened notebook: ${notebook.colabName ?? notebook.name}`);
         
@@ -989,8 +1175,8 @@ program
       return;
     }
 
-    const port = parseInt(options.port, 10);
-    const timeout = parseInt(options.timeout, 10);
+    const port = Number.parseInt(options.port, 10);
+    const timeout = Number.parseInt(options.timeout, 10);
 
     await startServeServer({
       port,
@@ -1003,10 +1189,342 @@ program
     });
   });
 
-program.parseAsync().catch((err) => {
+// Session management commands
+const sessionsCmd = program
+  .command("sessions")
+  .description("Manage Colab runtime sessions");
+
+sessionsCmd
+  .command("list")
+  .description("List all active Colab runtime sessions")
+  .option("--json", "Output as JSON")
+  .option("--stats", "Show summary statistics")
+  .action(async (options, cmd) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    const jsonMode = Boolean(options.json);
+    
+    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+      const session = await auth.getAccessToken(globalOptions.forceLogin);
+      
+      if (!jsonMode && !options.stats) {
+        console.log(
+          chalk.green(
+            `Authenticated as ${session.account.label} <${session.account.id}>`,
+          ),
+        );
+      }
+      
+      if (options.stats) {
+        const stats = await sessionManager.getStats();
+        if (jsonMode) {
+          console.log(JSON.stringify(stats, null, 2));
+        } else {
+          console.log(chalk.bold("Session Statistics"));
+          console.log(chalk.gray("─".repeat(50)));
+          console.log(`Total sessions: ${stats.totalSessions}`);
+          console.log(`${chalk.green("●")} Active: ${stats.activeSessions}`);
+          console.log(`${chalk.blue("●")} Connected: ${stats.connectedSessions}`);
+          console.log(`${chalk.red("●")} Stale: ${stats.staleSessions}`);
+          console.log(`Max sessions: ${stats.maxSessions} (${stats.tier} tier)`);
+        }
+        return;
+      }
+      
+      const sessions = await sessionManager.listSessions();
+      
+      if (jsonMode) {
+        console.log(JSON.stringify(sessions, null, 2));
+      } else {
+        if (sessions.length === 0) {
+          console.log(chalk.gray("\nNo active sessions"));
+          console.log(chalk.gray("Run 'lecoder-cgpu connect' to create a new session"));
+          return;
+        }
+        
+        console.log(chalk.bold(`\nActive Sessions (${sessions.length}):`));
+        console.log(chalk.gray("─".repeat(100)));
+        
+        for (const sess of sessions) {
+          const idShort = sess.id.substring(0, 8);
+          const activeMarker = sess.isActive ? chalk.green("* ") : "  ";
+          
+          let statusColor: typeof chalk.green;
+          if (sess.status === "connected") {
+            statusColor = chalk.green;
+          } else if (sess.status === "active") {
+            statusColor = chalk.blue;
+          } else if (sess.status === "stale") {
+            statusColor = chalk.red;
+          } else {
+            statusColor = chalk.gray;
+          }
+          
+          const createdAgo = formatRelativeTime(new Date(sess.createdAt));
+          const lastUsedAgo = formatRelativeTime(new Date(sess.lastUsedAt));
+          
+          console.log(`${activeMarker}${chalk.bold(idShort)} ${sess.label}`);
+          console.log(`  Variant: ${sess.variant.toUpperCase()} | Accelerator: ${sess.runtime.accelerator}`);
+          console.log(`  Status: ${statusColor(sess.status.toUpperCase())}`);
+          if (sess.kernelState) {
+            console.log(`  Kernel: ${sess.kernelState}`);
+          }
+          console.log(`  Created: ${createdAgo} | Last used: ${lastUsedAgo}`);
+          console.log("");
+        }
+        
+        const activeSession = sessions.find(s => s.isActive);
+        if (activeSession) {
+          console.log(chalk.gray(`Active session: ${activeSession.id.substring(0, 8)}`));
+        }
+      }
+    });
+  });
+
+sessionsCmd
+  .command("switch")
+  .description("Switch to a different Colab runtime session")
+  .argument("[session-id]", "Session ID to switch to (defaults to --session flag)")
+  .action(async (sessionId: string | undefined, cmd) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    const targetSessionId = sessionId ?? globalOptions.session;
+
+    if (!targetSessionId) {
+      console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      process.exit(1);
+    }
+    
+    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+      const session = await auth.getAccessToken(globalOptions.forceLogin);
+      console.log(
+        chalk.green(
+          `Authenticated as ${session.account.label} <${session.account.id}>`,
+        ),
+      );
+      
+      try {
+        const switched = await sessionManager.switchSession(targetSessionId);
+        console.log(chalk.green(`\n✓ Switched to session ${switched.id.substring(0, 8)}`));
+        console.log(chalk.gray(`  ${switched.label}`));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\n✗ ${message}`));
+        process.exit(1);
+      }
+    });
+  });
+
+sessionsCmd
+  .command("close")
+  .description("Close a specific session")
+  .argument("[session-id]", "Session ID to close (defaults to --session flag)")
+  .action(async (sessionId: string | undefined, cmd) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    const targetSessionId = sessionId ?? globalOptions.session;
+
+    if (!targetSessionId) {
+      console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      process.exit(1);
+    }
+    
+    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+      const session = await auth.getAccessToken(globalOptions.forceLogin);
+      console.log(
+        chalk.green(
+          `Authenticated as ${session.account.label} <${session.account.id}>`,
+        ),
+      );
+      
+      try {
+        await sessionManager.removeSession(targetSessionId);
+        console.log(chalk.green(`\n✓ Closed session ${targetSessionId.substring(0, 8)}`));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\n✗ ${message}`));
+        process.exit(1);
+      }
+    });
+  });
+
+sessionsCmd
+  .command("clean")
+  .description("Remove stale sessions (runtimes no longer assigned)")
+  .action(async (cmd) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+      const session = await auth.getAccessToken(globalOptions.forceLogin);
+      console.log(
+        chalk.green(
+          `Authenticated as ${session.account.label} <${session.account.id}>`,
+        ),
+      );
+      
+      const spinner = ora("Cleaning stale sessions...").start();
+      
+      try {
+        const removed = await sessionManager.cleanStaleSessions();
+        
+        if (removed.length === 0) {
+          spinner.succeed("No stale sessions found");
+        } else {
+          spinner.succeed(`Removed ${removed.length} stale session(s)`);
+          for (const id of removed) {
+            console.log(chalk.gray(`  ${id.substring(0, 8)}`));
+          }
+        }
+      } catch (error) {
+        spinner.fail("Failed to clean sessions");
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\n${message}`));
+        process.exit(1);
+      }
+    });
+  });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug Logs Management Commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+const debugCmd = program
+  .command("debug")
+  .description("View and manage application debug logs");
+
+debugCmd
+  .command("show")
+  .description("Display recent log entries")
+  .option("-n, --lines <count>", "number of entries to show", "50")
+  .option("-l, --level <level>", "minimum log level (debug, info, warn, error)", "info")
+  .option("-c, --category <category>", "filter by category (CLI, API, SESSION, RUNTIME, etc.)")
+  .option("-s, --search <text>", "search for text in logs")
+  .option("--json", "output as JSON")
+  .action(async (options, cmd) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ logger }) => {
+      const levelMap: Record<string, number> = {
+        debug: 0,
+        info: 1,
+        warn: 2,
+        error: 3,
+      };
+      
+      const entries = await logger.searchLogs({
+        level: levelMap[options.level.toLowerCase()] ?? 1,
+        category: options.category?.toUpperCase(),
+        searchText: options.search,
+        limit: Number.parseInt(options.lines, 10),
+      });
+      
+      if (options.json) {
+        console.log(JSON.stringify(entries, null, 2));
+        return;
+      }
+      
+      if (entries.length === 0) {
+        console.log(chalk.gray("No log entries found."));
+        return;
+      }
+      
+      for (const entry of entries) {
+        const levelColors: Record<string, typeof chalk.gray> = {
+          DEBUG: chalk.gray,
+          INFO: chalk.blue,
+          WARN: chalk.yellow,
+          ERROR: chalk.red,
+        };
+        const levelColor = levelColors[entry.levelName] ?? chalk.white;
+        
+        const time = new Date(entry.timestamp).toLocaleTimeString();
+        const categoryTag = chalk.cyan("[" + entry.category + "]");
+        console.log(
+          `${chalk.gray(time)} ${levelColor(entry.levelName.padEnd(5))} ${categoryTag} ${entry.message}`
+        );
+        if (entry.data) {
+          console.log(chalk.gray(`  ${JSON.stringify(entry.data)}`));
+        }
+        if (entry.error) {
+          console.log(chalk.red(`  Error: ${entry.error.message}`));
+        }
+      }
+    });
+  });
+
+debugCmd
+  .command("list")
+  .description("List available log files")
+  .action(async (cmd: { parent?: { parent?: { opts: () => GlobalOptions } } }) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ logger }) => {
+      const files = await logger.listLogFiles();
+      
+      if (files.length === 0) {
+        console.log(chalk.gray("No log files found."));
+        return;
+      }
+      
+      console.log(chalk.bold("Log files:"));
+      console.log(chalk.gray(`Location: ${logger.getLogsDir()}\n`));
+      
+      for (const file of files) {
+        console.log(`  ${file}`);
+      }
+    });
+  });
+
+debugCmd
+  .command("path")
+  .description("Show the logs directory path")
+  .action(async (cmd: { parent?: { parent?: { opts: () => GlobalOptions } } }) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ logger }) => {
+      console.log(logger.getLogsDir());
+    });
+  });
+
+debugCmd
+  .command("tail")
+  .description("Show the most recent log entries (like tail -f)")
+  .option("-n, --lines <count>", "number of entries to show", "20")
+  .action(async (options: { lines: string }, cmd: { parent?: { parent?: { opts: () => GlobalOptions } } }) => {
+    const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ logger }) => {
+      const entries = await logger.searchLogs({
+        limit: Number.parseInt(options.lines, 10),
+      });
+      
+      if (entries.length === 0) {
+        console.log(chalk.gray("No log entries yet."));
+        return;
+      }
+      
+      // Show in chronological order (reverse since searchLogs returns newest first)
+      const chronologicalEntries = [...entries].reverse();
+      for (const entry of chronologicalEntries) {
+        const levelColors: Record<string, typeof chalk.gray> = {
+          DEBUG: chalk.gray,
+          INFO: chalk.blue,
+          WARN: chalk.yellow,
+          ERROR: chalk.red,
+        };
+        const levelColor = levelColors[entry.levelName] ?? chalk.white;
+        
+        const time = new Date(entry.timestamp).toLocaleTimeString();
+        const categoryTag = chalk.cyan("[" + entry.category + "]");
+        console.log(
+          `${chalk.gray(time)} ${levelColor(entry.levelName.padEnd(5))} ${categoryTag} ${entry.message}`
+        );
+      }
+    });
+  });
+
+try {
+  await program.parseAsync();
+} catch (err) {
   if (isAlreadyReportedError(err)) {
     process.exit(1);
-    return;
   }
   const message = err instanceof Error ? err.message : String(err);
   console.error(chalk.red(message));
@@ -1014,7 +1532,7 @@ program.parseAsync().catch((err) => {
     console.error(chalk.gray(err.stack));
   }
   process.exit(1);
-});
+}
 
 async function withApp(
   options: GlobalOptions,
@@ -1049,6 +1567,26 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatRelativeTime(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHour = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHour / 24);
+  
+  if (diffDay > 0) {
+    return `${diffDay}d ago`;
+  }
+  if (diffHour > 0) {
+    return `${diffHour}h ago`;
+  }
+  if (diffMin > 0) {
+    return `${diffMin}m ago`;
+  }
+  return `${diffSec}s ago`;
 }
 
 function isAlreadyReportedError(err: unknown): err is { alreadyReported: true } {
@@ -1144,7 +1682,7 @@ async function runKernelMode(
 
   console.log(chalk.green("Jupyter kernel REPL ready."));
   console.log(chalk.gray("Enter Python code to execute. Use Ctrl+C or type 'exit' to quit."));
-  console.log(chalk.gray("For multi-line input, end a line with \\ to continue."));
+  console.log(chalk.gray(String.raw`For multi-line input, end a line with \ to continue.`));
   console.log("");
 
   let multiLineBuffer = "";
@@ -1261,7 +1799,9 @@ function displayExecutionResult(result: ExecutionResult, _isStartup: boolean): v
   // Display display_data (text/plain representations)
   for (const data of result.display_data) {
     if (data.data["text/plain"]) {
-      console.log(chalk.cyan(String(data.data["text/plain"])));
+      const textData = data.data["text/plain"];
+      const textOutput = typeof textData === "string" ? textData : JSON.stringify(textData);
+      console.log(chalk.cyan(textOutput));
     } else if (data.data["text/html"]) {
       console.log(chalk.gray("[HTML output - see notebook for rendered view]"));
     } else if (data.data["image/png"]) {

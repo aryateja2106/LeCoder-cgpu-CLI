@@ -33,6 +33,7 @@ import {
   COLAB_XSRF_TOKEN_HEADER,
 } from "./headers.js";
 import { uuidToWebSafeBase64 } from "../utils/uuid.js";
+import { getFileLogger } from "../utils/file-logger.js";
 
 const XSSI_PREFIX = ")]}'\n";
 const TUN_ENDPOINT = "/tun/m";
@@ -404,6 +405,9 @@ export class ColabClient {
     init: RequestInit,
     schema?: z.ZodType,
   ): Promise<unknown> {
+    const logger = getFileLogger();
+    const startTime = Date.now();
+    
     if (endpoint.hostname === this.colabDomain.hostname) {
       endpoint.searchParams.append("authuser", "0");
     }
@@ -420,21 +424,38 @@ export class ColabClient {
       headers,
       agent: this.httpsAgent,
     });
-    const response = await fetch(request);
-    if (!response.ok) {
-      let errorBody: string | undefined;
-      try {
-        errorBody = await response.text();
-      } catch {
-        // ignore
+    
+    try {
+      const response = await fetch(request);
+      const durationMs = Date.now() - startTime;
+      
+      if (!response.ok) {
+        let errorBody: string | undefined;
+        try {
+          errorBody = await response.text();
+        } catch {
+          // ignore
+        }
+        const error = new ColabRequestError({ request, response, responseBody: errorBody });
+        logger?.logApi(init.method ?? "GET", endpoint.pathname, response.status, durationMs, error);
+        throw error;
       }
-      throw new ColabRequestError({ request, response, responseBody: errorBody });
+      
+      logger?.logApi(init.method ?? "GET", endpoint.pathname, response.status, durationMs);
+      
+      if (!schema) {
+        return;
+      }
+      const body = await response.text();
+      return schema.parse(JSON.parse(stripXssiPrefix(body)));
+    } catch (error) {
+      if (error instanceof ColabRequestError) {
+        throw error;
+      }
+      const durationMs = Date.now() - startTime;
+      logger?.logApi(init.method ?? "GET", endpoint.pathname, undefined, durationMs, error instanceof Error ? error : undefined);
+      throw error;
     }
-    if (!schema) {
-      return;
-    }
-    const body = await response.text();
-    return schema.parse(JSON.parse(stripXssiPrefix(body)));
   }
 }
 

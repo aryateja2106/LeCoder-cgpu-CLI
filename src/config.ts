@@ -21,9 +21,9 @@ export type CliConfig = z.infer<typeof ConfigSchema> & {
 
 export type ConfigFile = z.infer<typeof ConfigSchema>;
 
-const appPaths = envPaths("cgpu", { suffix: "" });
-const DEFAULT_CONFIG_DIR = process.env.CGPU_CONFIG_DIR
-  ? path.resolve(process.env.CGPU_CONFIG_DIR)
+const appPaths = envPaths("lecoder-cgpu", { suffix: "" });
+const DEFAULT_CONFIG_DIR = process.env.LECODER_CGPU_CONFIG_DIR
+  ? path.resolve(process.env.LECODER_CGPU_CONFIG_DIR)
   : appPaths.config;
 const DEFAULT_CONFIG_PATH = path.join(DEFAULT_CONFIG_DIR, "config.json");
 const DEFAULT_STORAGE_DIR = path.join(DEFAULT_CONFIG_DIR, "state");
@@ -82,7 +82,7 @@ function buildMissingCredentialsMessage(
 ): string {
   const lines = [
     "Missing Colab OAuth credentials.",
-    `cgpu now stores credentials in a single config file at ${configPath}.`,
+    `lecoder-cgpu now stores credentials in a single config file at ${configPath}.`,
     "Re-run this command from an interactive terminal to launch the guided setup,",
     "or create the file manually with your OAuth client ID and secret.",
   ];
@@ -144,7 +144,7 @@ export async function runInteractiveOAuthWizard(
       [
         `Open ${chalk.underline("https://console.cloud.google.com/")} in your browser.`,
         "Click the project selector at the top and choose \"New Project\".",
-        "Give it any name (\"cgpu\" works great) and click Create.",
+        "Give it any name (lecoder-cgpu works great) and click Create.",
       ],
     );
 
@@ -156,8 +156,8 @@ export async function runInteractiveOAuthWizard(
       [
         `Visit ${chalk.underline("https://console.cloud.google.com/auth/clients")}.`,
         "Pick your new project, hit \"Create client\" or \"Get started\".",
-        "If you clicked Get Started, Choose any App Name (eg. cgpu), select your email for support email, choose external for the audience, put in your email, then finish.",
-        "If you clicked Create client or have finished the previous step, after clicking \"Create client\", select \"Desktop app\" as the application type, give it any name you like (eg. cgpu), and click Create.",
+        "If you clicked Get Started, Choose any App Name (e.g. lecoder-cgpu), select your email for support email, choose external for the audience, put in your email, then finish.",
+        "If you clicked Create client or have finished the previous step, after clicking \"Create client\", select \"Desktop app\" as the application type, give it any name you like (e.g. lecoder-cgpu), and click Create.",
         "After it's created, keep the dialog open—you'll need the generated ID and secret.",
       ],
     );
