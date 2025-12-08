@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Build outputs
+dist/
+binaries/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Secrets and credentials (CRITICAL - DO NOT COMMIT)
+client_secret_*.json
+**/client_secret*.json
+credentials.json
+token.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# User configuration and state
+config/
+.config/
+state/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+.temp/
+
+# Development
+.claude/
+.cursor/

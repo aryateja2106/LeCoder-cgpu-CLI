@@ -1,0 +1,10 @@
+src/
+tests/
+scripts/
+*.ts
+tsconfig*.json
+.gitignore
+.github/
+docs/
+integration-tests/
+binaries/

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a Question
+    url: https://github.com/aryateja2106/LeCoder-cgpu-CLI/discussions
+    about: Ask questions and discuss with the community
+  - name: Security Vulnerability
+    url: mailto:aryateja2106@gmail.com
+    about: Report security vulnerabilities privately

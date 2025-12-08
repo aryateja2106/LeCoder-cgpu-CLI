@@ -1,0 +1,72 @@
+{
+  "name": "lecoder-cgpu",
+  "version": "0.4.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aryateja2106/LeCoder-cgpu-CLI.git"
+  },
+  "description": "Control Google Colab from your terminal - Run code on free cloud GPUs without leaving your IDE",
+  "type": "module",
+  "bin": {
+    "lecoder-cgpu": "./dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "postbuild": "node scripts/make-bin-executable.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prebuild": "npm run clean",
+    "prepublishOnly": "npm run lint && npm run test && npm run build",
+    "pkg:build": "pkg . --out-path ./binaries",
+    "pkg:macos": "pkg . --targets node18-macos-x64,node18-macos-arm64 --out-path ./binaries",
+    "pkg:windows": "pkg . --targets node18-win-x64 --out-path ./binaries",
+    "pkg:linux": "pkg . --targets node18-linux-x64,node18-linux-arm64 --out-path ./binaries",
+    "pkg:all": "npm run pkg:macos && npm run pkg:windows && npm run pkg:linux"
+  },
+  "keywords": [
+    "colab",
+    "gpu",
+    "cuda",
+    "cli",
+    "lecoder",
+    "jupyter",
+    "google-drive",
+    "notebook",
+    "machine-learning",
+    "ai"
+  ],
+  "author": "Arya Teja <aryateja2106@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/aryateja2106/LeCoder-cgpu-CLI/issues"
+  },
+  "homepage": "https://github.com/aryateja2106/LeCoder-cgpu-CLI#readme",
+  "dependencies": {
+    "chalk": "5.3.0",
+    "commander": "12.1.0",
+    "env-paths": "2.2.1",
+    "google-auth-library": "10.4.1",
+    "node-fetch": "3.3.2",
+    "open": "9.1.0",
+    "ora": "8.0.1",
+    "ws": "^8.18.3",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.25",
+    "@types/ws": "8.5.10",
+    "@yao-pkg/pkg": "^5.11.5",
+    "ts-node": "10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "5.4.3",
+    "vitest": "^1.6.1"
+  },
+  "pkg": {
+    "scripts": "dist/**/*.js",
+    "assets": ["package.json"],
+    "outputPath": "binaries"
+  }
+}
