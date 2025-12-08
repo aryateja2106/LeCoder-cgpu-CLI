@@ -1,6 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('Auth Flow Integration', () => {
+  // Save original fetch to restore after each test
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    // Save original fetch implementation
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    // Restore original fetch implementation
+    globalThis.fetch = originalFetch;
+  });
+
   describe('OAuth Flow', () => {
     it('should complete full OAuth flow with authorization code', async () => {
       // This integration test simulates the OAuth flow by:
@@ -32,8 +45,8 @@ describe('Auth Flow Integration', () => {
         })
       });
       
-      global.fetch = mockFetch as any;
-      
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+
       // Simulate the token exchange
       const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
@@ -98,8 +111,8 @@ describe('Auth Flow Integration', () => {
         })
       });
       
-      global.fetch = mockFetch as any;
-      
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+
       const response = await fetch('https://oauth2.googleapis.com/token', {
         method: 'POST',
         body: new URLSearchParams({

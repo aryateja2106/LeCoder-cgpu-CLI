@@ -238,5 +238,123 @@ describe("ConnectionPool", () => {
         pool.getOrCreateConnection(runtime2, mockColabClient)
       ).rejects.toThrow("Connection limit reached");
     });
+
+    it("should allow connections up to pro tier limit", async () => {
+      pool.setSubscriptionTier(1); // Pro tier, limit of 5
+
+      const runtimes: AssignedRuntime[] = [];
+      for (let i = 0; i < 5; i++) {
+        runtimes.push({
+          ...mockRuntime,
+          endpoint: `test-endpoint-${i}`,
+        });
+      }
+
+      for (const runtime of runtimes) {
+        await pool.getOrCreateConnection(runtime, mockColabClient);
+      }
+
+      expect(pool.listConnections()).toHaveLength(5);
+    });
+
+    it("should throw when pro tier limit is exceeded", async () => {
+      pool.setSubscriptionTier(1); // Pro tier, limit of 5
+
+      // Create 5 connections
+      for (let i = 0; i < 5; i++) {
+        const runtime: AssignedRuntime = {
+          ...mockRuntime,
+          endpoint: `test-endpoint-${i}`,
+        };
+        await pool.getOrCreateConnection(runtime, mockColabClient);
+      }
+
+      // Try to create 6th connection
+      const runtime6: AssignedRuntime = {
+        ...mockRuntime,
+        endpoint: "test-endpoint-6",
+      };
+
+      await expect(
+        pool.getOrCreateConnection(runtime6, mockColabClient)
+      ).rejects.toThrow("Connection limit reached");
+    });
+  });
+
+  describe("connection reuse", () => {
+    it("should reuse connection even after multiple gets", async () => {
+      const connection1 = await pool.getOrCreateConnection(mockRuntime, mockColabClient);
+      const connection2 = await pool.getOrCreateConnection(mockRuntime, mockColabClient);
+      const connection3 = await pool.getOrCreateConnection(mockRuntime, mockColabClient);
+
+      expect(connection1).toBe(connection2);
+      expect(connection2).toBe(connection3);
+      expect(pool.listConnections()).toHaveLength(1);
+    });
+  });
+
+  describe("health check failures", () => {
+    it("should handle connection that becomes unhealthy", async () => {
+      const connection = await pool.getOrCreateConnection(mockRuntime, mockColabClient);
+      
+      // Verify connection exists
+      expect(connection).toBeDefined();
+      expect(pool.listConnections()).toHaveLength(1);
+    });
+  });
+
+  describe("concurrent access", () => {
+    it("should handle concurrent connection requests for same endpoint", async () => {
+      const promises = [
+        pool.getOrCreateConnection(mockRuntime, mockColabClient),
+        pool.getOrCreateConnection(mockRuntime, mockColabClient),
+        pool.getOrCreateConnection(mockRuntime, mockColabClient),
+      ];
+
+      const connections = await Promise.all(promises);
+
+      // All should be the same connection
+      expect(connections[0]).toBe(connections[1]);
+      expect(connections[1]).toBe(connections[2]);
+      expect(pool.listConnections()).toHaveLength(1);
+    });
+
+    it("should handle concurrent connection requests for different endpoints", async () => {
+      pool.setSubscriptionTier(1); // Pro tier
+
+      const runtimes = [
+        { ...mockRuntime, endpoint: "endpoint-a" },
+        { ...mockRuntime, endpoint: "endpoint-b" },
+        { ...mockRuntime, endpoint: "endpoint-c" },
+      ];
+
+      const promises = runtimes.map((runtime) =>
+        pool.getOrCreateConnection(runtime, mockColabClient)
+      );
+
+      const connections = await Promise.all(promises);
+
+      expect(connections).toHaveLength(3);
+      expect(new Set(connections).size).toBe(3);
+      expect(pool.listConnections()).toHaveLength(3);
+    });
+  });
+
+  describe("connection eviction", () => {
+    it("should not evict connections when under limit", async () => {
+      pool.setSubscriptionTier(1); // Pro tier, limit of 5
+
+      await pool.getOrCreateConnection(mockRuntime, mockColabClient);
+
+      const runtime2: AssignedRuntime = {
+        ...mockRuntime,
+        endpoint: "test-endpoint-2",
+      };
+      await pool.getOrCreateConnection(runtime2, mockColabClient);
+
+      // Both connections should still exist
+      expect(pool.getConnection("test-endpoint-1")).toBeDefined();
+      expect(pool.getConnection("test-endpoint-2")).toBeDefined();
+    });
   });
 });

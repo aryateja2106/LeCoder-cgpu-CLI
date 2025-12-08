@@ -1,30 +1,27 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { ExecutionHistoryStorage } from "../../src/runtime/execution-history.js";
 import { ReplyStatus } from "../../src/jupyter/protocol.js";
 import { ErrorCategory } from "../../src/jupyter/error-handler.js";
 
 describe("ExecutionHistoryStorage", () => {
   let storage: ExecutionHistoryStorage;
-  const testHistoryPath = path.join(
-    homedir(),
-    ".config",
-    "lecoder-cgpu",
-    "state",
-    "history.jsonl"
-  );
+  let testHistoryPath: string;
+  let tempDir: string;
 
   beforeEach(async () => {
-    storage = new ExecutionHistoryStorage();
-    // Clear any existing history
+    tempDir = await fs.mkdtemp(path.join(tmpdir(), "history-test-"));
+    testHistoryPath = path.join(tempDir, "history.jsonl");
+    storage = new ExecutionHistoryStorage({ historyPath: testHistoryPath });
     await storage.clear();
   });
 
   afterEach(async () => {
-    // Clean up test data
     await storage.clear();
+    // Remove temp directory
+    await fs.rm(tempDir, { recursive: true, force: true });
   });
 
   describe("append", () => {

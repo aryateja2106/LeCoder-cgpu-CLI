@@ -221,6 +221,38 @@ describe("OutputFormatter", () => {
     });
   });
 
+  describe("formatStatus", () => {
+    it("should format status info as JSON including session stats", () => {
+      const statusInfo = {
+        authenticated: true,
+        account: { id: "test-id", label: "test-user" },
+        eligibleGpus: ["T4"],
+        runtimes: [],
+        sessions: {
+          total: 1,
+          active: 1,
+          connected: 1,
+          stale: 0,
+          max: 5,
+          tier: "pro",
+          activeSession: {
+            id: "session-1",
+            label: "Session 1",
+            runtime: "Colab T4",
+          },
+        },
+      };
+
+      const json = OutputFormatter.formatStatus(statusInfo, true);
+      const parsed = JSON.parse(json);
+
+      expect(parsed.authenticated).toBe(true);
+      expect(parsed.sessions).toBeDefined();
+      expect(parsed.sessions.total).toBe(1);
+      expect(parsed.sessions.activeSession.id).toBe("session-1");
+    });
+  });
+
   describe("isJsonMode", () => {
     it("should detect --json flag in argv", () => {
       const originalArgv = process.argv;
