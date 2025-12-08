@@ -1,6 +1,6 @@
 {
   "name": "lecoder-cgpu",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "repository": {
     "type": "git",
     "url": "https://github.com/aryateja2106/LeCoder-cgpu-CLI.git"
@@ -16,15 +16,23 @@
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run tests/unit/",
+    "test:integration": "vitest run tests/integration/",
+    "test:e2e": "vitest run tests/e2e/",
+    "test:perf": "vitest run tests/performance/",
+    "test:coverage": "vitest run --coverage",
+    "test:ci": "npm run lint && vitest run --coverage --reporter=verbose",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
     "prepublishOnly": "npm run lint && npm run test && npm run build",
     "pkg:build": "pkg . --out-path ./binaries",
-    "pkg:macos": "pkg . --targets node18-macos-x64,node18-macos-arm64 --out-path ./binaries",
-    "pkg:windows": "pkg . --targets node18-win-x64 --out-path ./binaries",
-    "pkg:linux": "pkg . --targets node18-linux-x64,node18-linux-arm64 --out-path ./binaries",
-    "pkg:all": "npm run pkg:macos && npm run pkg:windows && npm run pkg:linux"
+    "pkg:macos": "pkg . --targets node18-macos-x64 --output ./binaries/lecoder-cgpu-macos-x64 && pkg . --targets node18-macos-arm64 --output ./binaries/lecoder-cgpu-macos-arm64",
+    "pkg:windows": "pkg . --targets node18-win-x64 --output ./binaries/lecoder-cgpu-win-x64.exe",
+    "pkg:linux": "pkg . --targets node18-linux-x64 --output ./binaries/lecoder-cgpu-linux-x64 && pkg . --targets node18-linux-arm64 --output ./binaries/lecoder-cgpu-linux-arm64",
+    "pkg:all": "npm run build && npm run pkg:macos && npm run pkg:windows && npm run pkg:linux",
+    "pkg:test": "node scripts/test-binaries.js",
+    "prepkg": "npm run build"
   },
   "keywords": [
     "colab",
@@ -57,16 +65,27 @@
   },
   "devDependencies": {
     "@types/node": "20.11.25",
+    "@types/uuid": "^10.0.0",
     "@types/ws": "8.5.10",
     "@yao-pkg/pkg": "^5.11.5",
     "ts-node": "10.9.2",
     "tsx": "^4.20.6",
     "typescript": "5.4.3",
+    "uuid": "^13.0.0",
     "vitest": "^1.6.1"
   },
   "pkg": {
     "scripts": "dist/**/*.js",
-    "assets": ["package.json"],
+    "assets": [
+      "package.json"
+    ],
+    "targets": [
+      "node18-macos-x64",
+      "node18-macos-arm64",
+      "node18-win-x64",
+      "node18-linux-x64",
+      "node18-linux-arm64"
+    ],
     "outputPath": "binaries"
   }
 }
