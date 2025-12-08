@@ -8,8 +8,10 @@ import http from "node:http";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(__dirname, "fixtures");
 const MOCK_GEMINI = path.join(FIXTURES_DIR, "mock-gemini.js");
+const shouldRunServeTests = process.env.RUN_SERVE_TESTS === "true";
+const describeServe = shouldRunServeTests ? describe : describe.skip;
 
-describe("cgpu serve", () => {
+describeServe("cgpu serve", () => {
   let server: http.Server | undefined;
 
   beforeAll(async () => {

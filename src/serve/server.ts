@@ -103,7 +103,7 @@ export async function startServeServer(options: ServeServerOptions = {}): Promis
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
       config.logger.log(
-        `cgpu serve listening on http://${config.host}:${config.port} (default model: ${config.defaultModel})`,
+        `lecoder-cgpu serve listening on http://${config.host}:${config.port} (default model: ${config.defaultModel})`,
       );
       resolve();
     });
@@ -111,7 +111,7 @@ export async function startServeServer(options: ServeServerOptions = {}): Promis
 
   const shutdown = () => {
     server.close(() => {
-      config.logger.log("cgpu serve shutdown complete");
+      config.logger.log("lecoder-cgpu serve shutdown complete");
     });
   };
 

@@ -37,7 +37,7 @@ export async function runGeminiCli({
   }
 
   const workspaceRoot = await fs.mkdtemp(
-    path.join(cwdPrefix ?? os.tmpdir(), "cgpu-serve-"),
+    path.join(cwdPrefix ?? os.tmpdir(), "lecoder-cgpu-serve-"),
   );
 
   const env = {
@@ -153,7 +153,7 @@ export async function runGeminiCli({
       throw new HttpError(
         500,
         "gemini_cli_missing",
-        `Unable to find Gemini CLI executable "${geminiBin}". Install it globally or pass --gemini-bin to cgpu serve.`,
+        `Unable to find Gemini CLI executable "${geminiBin}". Install it globally or pass --gemini-bin to lecoder-cgpu serve.`,
       );
     }
     throw error;
