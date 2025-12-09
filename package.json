@@ -1,12 +1,23 @@
 {
   "name": "lecoder-cgpu",
   "version": "0.5.1",
+  "description": "Control Google Colab from your terminal - Run code on free cloud GPUs without leaving your IDE",
   "repository": {
     "type": "git",
     "url": "https://github.com/aryateja2106/LeCoder-cgpu-CLI.git"
   },
-  "description": "Control Google Colab from your terminal - Run code on free cloud GPUs without leaving your IDE",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "lecoder-cgpu": "./dist/src/index.js"
   },
