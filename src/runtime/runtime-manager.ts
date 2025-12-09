@@ -202,19 +202,47 @@ export class RuntimeManager {
 
   private async findReusableAssignment(variant: Variant) {
     const assignments = await this.client.listAssignments();
-    return assignments.find((assignment) => assignment.variant === variant);
+    const matching = assignments.find((assignment) => assignment.variant === variant);
+    
+    // If no matching variant found but other runtimes exist, provide helpful error
+    if (!matching && assignments.length > 0 && variant !== Variant.GPU) {
+      const availableTypes = [...new Set(assignments.map(a => a.variant))].join(", ");
+      const logger = getFileLogger();
+      logger?.warn("RUNTIME", "Requested variant not available", {
+        requested: variant,
+        available: availableTypes
+      });
+      // Return undefined to trigger new assignment attempt
+    }
+    
+    return matching;
   }
 
   private async runtimeFromAssignment(
     assignment: {
       accelerator: string;
       endpoint: string;
+      variant?: Variant;
     },
-    variant: Variant,
+    requestedVariant: Variant,
   ): Promise<AssignedRuntime> {
     const proxy = await this.client.refreshConnection(assignment.endpoint);
+    
+    // Use the assignment's actual variant if available, otherwise use requested
+    const actualVariant = assignment.variant ?? requestedVariant;
+    
+    // Log warning if there's a mismatch (shouldn't happen with proper findReusableAssignment)
+    if (assignment.variant && assignment.variant !== requestedVariant) {
+      const logger = getFileLogger();
+      logger?.warn("RUNTIME", "Variant mismatch detected", {
+        requested: requestedVariant,
+        assigned: assignment.variant,
+        accelerator: assignment.accelerator
+      });
+    }
+    
     return {
-      label: `Colab ${variantLabel(variant)} ${assignment.accelerator}`,
+      label: `Colab ${variantLabel(actualVariant)} ${assignment.accelerator}`,
       accelerator: assignment.accelerator,
       endpoint: assignment.endpoint,
       proxy,

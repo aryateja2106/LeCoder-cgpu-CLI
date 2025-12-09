@@ -21,7 +21,7 @@ export class TerminalSession {
     const terminalName = await this.createRemoteTerminal();
     console.log(
       chalk.gray(
-        `Opening terminal session ${terminalName} on ${this.runtime.label}...`,
+        `Connecting to ${this.runtime.label}...`,
       ),
     );
     await this.attachToTerminal(terminalName);
