@@ -175,13 +175,16 @@ program
   .action(async (_args, cmd) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const connectOptions = (cmd.opts() as ConnectCommandOptions) ?? {};
-    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager }) => {
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager, connectionPool }) => {
       const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       console.log(
         chalk.green(
           `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
         ),
       );
+      
+      // Update subscription tier for accurate session limits
+      await updateSubscriptionTier(colabClient, connectionPool);
       
       // Validate conflicting options
       if (globalOptions.session && (connectOptions.newRuntime || connectOptions.tpu || connectOptions.cpu)) {
@@ -243,9 +246,12 @@ program
     const runOptions = options ?? {};
     const mode = runOptions.mode || "terminal";
     
-    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager }) => {
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, runtimeManager, connectionPool }) => {
       const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       const jsonMode = Boolean(runOptions.json);
+      
+      // Update subscription tier for accurate session limits
+      await updateSubscriptionTier(colabClient, connectionPool);
       
       if (!jsonMode) {
         console.log(
@@ -357,13 +363,16 @@ program
   ) => {
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const copyOptions = options ?? {};
-    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+    await withApp(globalOptions, async ({ auth, sessionManager, colabClient, connectionPool }) => {
       const authSession = await auth.getAccessToken(globalOptions.forceLogin);
       console.log(
         chalk.green(
           `Authenticated as ${authSession.account.label} <${authSession.account.id}>`,
         ),
       );
+      
+      // Update subscription tier for accurate session limits
+      await updateSubscriptionTier(colabClient, connectionPool);
       
       // Validate conflicting options
       if (globalOptions.session && (copyOptions.newRuntime || copyOptions.tpu || copyOptions.cpu)) {
@@ -397,9 +406,12 @@ program
     const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
     const jsonMode = Boolean(cmdOptions.json);
     const targetSessionId = globalOptions.session;
-    await withApp(globalOptions, async ({ auth, colabClient, sessionManager }) => {
+    await withApp(globalOptions, async ({ auth, colabClient, sessionManager, connectionPool }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
       const ccu = await colabClient.getCcuInfo();
+      
+      // Update subscription tier for accurate limits/tier display
+      await updateSubscriptionTier(colabClient, connectionPool);
       let targetSession: EnrichedSession | undefined;
 
       if (targetSessionId) {
@@ -707,6 +719,14 @@ program
           `✓ Authenticated as ${session.account.label} <${session.account.id}>`
         )
       );
+      
+      // Display setup reminder for first-time users
+      console.log();
+      console.log(chalk.cyan.bold("📋 Setup Reminder:"));
+      console.log(chalk.gray("   To use notebook features (list, create, delete), you need Google Drive API enabled:"));
+      console.log(chalk.white("   → https://console.cloud.google.com/apis/api/drive.googleapis.com"));
+      console.log(chalk.gray("   Click 'ENABLE' if not already enabled."));
+      console.log();
 
       // Validate credentials if requested
       if (options.validate) {
@@ -1203,8 +1223,11 @@ sessionsCmd
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
     const jsonMode = Boolean(options.json);
     
-    await withApp(globalOptions, async ({ auth, sessionManager }) => {
+    await withApp(globalOptions, async ({ auth, sessionManager, colabClient, connectionPool }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
+      
+      // Update subscription tier for accurate limits/tier display
+      await updateSubscriptionTier(colabClient, connectionPool);
       
       if (!jsonMode && !options.stats) {
         console.log(
@@ -1540,6 +1563,41 @@ async function withApp(
 ) {
   const deps = await createApp(options.config);
   await fn(deps);
+}
+
+/**
+ * Fetch and update the subscription tier in the connection pool.
+ * This should be called after authentication to ensure accurate tier detection.
+ * 
+ * Detection logic:
+ * 1. Try to use eligibleGpus from CCU info - A100/L4 access indicates Pro tier
+ * 2. If that fails, default to free tier
+ */
+async function updateSubscriptionTier(
+  colabClient: ColabClient,
+  connectionPool: ConnectionPool
+): Promise<number> {
+  try {
+    // Use CCU info to determine tier based on eligible GPUs
+    // Pro users have access to A100, L4; Free users only get T4
+    const ccuInfo = await colabClient.getCcuInfo();
+    const eligibleGpus = ccuInfo.eligibleGpus.map(g => g.toUpperCase());
+    
+    // Pro tier indicators: A100, L4, V100 access
+    const proGpus = ["A100", "L4", "V100"];
+    const hasPro = proGpus.some(gpu => eligibleGpus.includes(gpu));
+    
+    // SubscriptionTier: 0 = NONE/Free, 1 = PRO, 2 = PRO_PLUS
+    const tier = hasPro ? 1 : 0;
+    connectionPool.setSubscriptionTier(tier);
+    return tier;
+  } catch (error) {
+    // If we can't fetch tier, default to free (0)
+    if (process.env.LECODER_CGPU_DEBUG) {
+      console.warn("Could not determine subscription tier, defaulting to free tier:", error);
+    }
+    return 0;
+  }
 }
 
 function resolveVariant({ tpu, cpu }: { tpu?: boolean; cpu?: boolean }): Variant {

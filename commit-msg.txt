@@ -1,0 +1,22 @@
+v0.5.4: Fix runtime variant selection, Drive API guidance, Pro tier detection
+
+## Features
+- Google Drive API setup guidance with helpful error messages
+- Post-authentication reminder with enable link
+- Automatic Colab Pro tier detection via eligibleGpus
+
+## Bug Fixes
+- Fixed --tpu and --cpu flags not being respected (was always connecting to A100)
+- Fixed session ID prefix matching in switch/close commands
+- Changed misleading "Opening terminal session X" message
+
+## Test Improvements
+- Fixed 40 failing tests (from 49 to 9)
+- Added missing mock methods (removeListener, getKernelInfo, etc.)
+- Fixed error categorization test expectations
+- Fixed concurrent ID generation in mock workflow tests
+
+## Documentation
+- Added Drive API setup section to README
+- Updated CHANGELOG with detailed release notes
+

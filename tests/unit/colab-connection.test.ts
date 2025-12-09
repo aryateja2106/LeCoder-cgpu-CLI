@@ -14,9 +14,16 @@ vi.mock("../../src/jupyter/kernel-client.js", () => {
       close: vi.fn(),
       connected: true,
       session: "mock-session-id",
-      on: vi.fn(),
+      on: vi.fn().mockImplementation(function(event: string, cb: Function) {
+        // Immediately emit "idle" status for the status handler
+        if (event === "status") {
+          setTimeout(() => cb("idle"), 0);
+        }
+        return this;
+      }),
       off: vi.fn(),
       removeAllListeners: vi.fn(),
+      removeListener: vi.fn(),
       executeCode: vi.fn().mockResolvedValue({
         status: "ok",
         execution_count: 1,

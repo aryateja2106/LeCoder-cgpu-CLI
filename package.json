@@ -1,6 +1,6 @@
 {
   "name": "lecoder-cgpu",
-  "version": "0.5.1",
+  "version": "0.5.4",
   "description": "Control Google Colab from your terminal - Run code on free cloud GPUs without leaving your IDE",
   "repository": {
     "type": "git",

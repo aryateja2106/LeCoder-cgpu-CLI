@@ -4,7 +4,7 @@
  * Tests error handling, recovery, and retry logic across components.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Types for error scenario testing
 interface ErrorResult {
@@ -310,6 +310,14 @@ describe("Error Scenarios E2E Tests", () => {
   });
 
   describe("retry wrapper", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("should retry on retryable errors", async () => {
       let callCount = 0;
 
@@ -327,7 +335,13 @@ describe("Error Scenarios E2E Tests", () => {
         return "success";
       };
 
-      const { result, attempts, recovered } = await runner.runWithRetry(operation);
+      const promise = runner.runWithRetry(operation);
+      
+      // Advance timers for each retry
+      await vi.advanceTimersByTimeAsync(1000); // First retry backoff
+      await vi.advanceTimersByTimeAsync(2000); // Second retry backoff
+      
+      const { result, attempts, recovered } = await promise;
 
       expect(result).toBe("success");
       expect(attempts).toBe(3);
@@ -368,7 +382,14 @@ describe("Error Scenarios E2E Tests", () => {
         throw error;
       };
 
-      const { result, attempts, recovered } = await runner.runWithRetry(operation, 3);
+      const promise = runner.runWithRetry(operation, 3);
+      
+      // Advance timers for each retry
+      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(4000);
+      
+      const { result, attempts, recovered } = await promise;
 
       expect(result).toBeNull();
       expect(attempts).toBe(3);

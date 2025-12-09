@@ -32,6 +32,7 @@ class MockWorkflowExecutor {
   private notebooks: Map<string, NotebookState> = new Map();
   private sessions: Map<string, { id: string; active: boolean }> = new Map();
   private executionHistory: { code: string; result: string }[] = [];
+  private idCounter = 0; // Counter for unique IDs
 
   // Auth flow
   async authenticate(): Promise<void> {
@@ -57,8 +58,9 @@ class MockWorkflowExecutor {
       throw new Error("Not authenticated");
     }
 
+    this.idCounter++;
     this.runtime = {
-      id: "runtime-" + Date.now(),
+      id: "runtime-" + this.idCounter,
       connected: true,
       variant,
     };
@@ -108,8 +110,9 @@ class MockWorkflowExecutor {
       throw new Error("Not authenticated");
     }
 
+    this.idCounter++;
     const notebook: NotebookState = {
-      id: "notebook-" + Date.now(),
+      id: "notebook-" + this.idCounter,
       name,
       runtimeConnected: false,
     };
@@ -156,8 +159,9 @@ class MockWorkflowExecutor {
       throw new Error("Not authenticated");
     }
 
+    this.idCounter++;
     const session = {
-      id: "session-" + Date.now(),
+      id: "session-" + this.idCounter,
       active: this.sessions.size === 0,
     };
 
@@ -198,6 +202,7 @@ class MockWorkflowExecutor {
     this.notebooks.clear();
     this.sessions.clear();
     this.executionHistory = [];
+    this.idCounter = 0;
   }
 }
 

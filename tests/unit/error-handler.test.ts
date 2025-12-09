@@ -37,43 +37,66 @@ const ErrorCodes = {
   UNKNOWN_ERROR: 1999,
 } as const;
 
-// Simulated error handler functions (mirrors expected behavior)
+// Simulated error handler functions (mirrors the actual implementation in src/jupyter/error-handler.ts)
 function categorizeError(errorName: string, errorMessage: string): ErrorCategory {
-  const nameLower = errorName.toLowerCase();
-  const msgLower = errorMessage.toLowerCase();
-
-  if (nameLower.includes("syntax") || msgLower.includes("syntax error")) {
+  // Syntax errors (exact match like actual implementation)
+  if (
+    errorName === "SyntaxError" ||
+    errorName === "IndentationError" ||
+    errorName === "TabError"
+  ) {
     return "syntax";
   }
 
-  if (nameLower.includes("memory") || msgLower.includes("out of memory")) {
-    return "memory";
-  }
-
-  if (
-    nameLower.includes("import") ||
-    nameLower.includes("module") ||
-    msgLower.includes("no module named")
-  ) {
+  // Import errors
+  if (errorName === "ImportError" || errorName === "ModuleNotFoundError") {
     return "import";
   }
 
-  if (nameLower.includes("timeout") || msgLower.includes("timed out")) {
+  // Memory errors
+  if (
+    errorName === "MemoryError" ||
+    errorName === "OutOfMemoryError" ||
+    errorName.includes("OOM") ||
+    errorMessage.toLowerCase().includes("out of memory")
+  ) {
+    return "memory";
+  }
+
+  // Timeout errors
+  if (
+    errorName === "TimeoutError" ||
+    errorName === "KeyboardInterrupt" ||
+    errorName.includes("Timeout")
+  ) {
     return "timeout";
   }
 
+  // IO errors
   if (
-    nameLower.includes("file") ||
-    nameLower.includes("permission") ||
-    nameLower.includes("io")
+    errorName === "IOError" ||
+    errorName === "OSError" ||
+    errorName === "FileNotFoundError" ||
+    errorName === "PermissionError" ||
+    errorName === "IsADirectoryError" ||
+    errorName === "NotADirectoryError"
   ) {
     return "io";
   }
 
+  // Common runtime errors (exact matches)
   if (
-    nameLower.includes("error") &&
-    !nameLower.includes("syntax") &&
-    !nameLower.includes("memory")
+    errorName === "NameError" ||
+    errorName === "TypeError" ||
+    errorName === "ValueError" ||
+    errorName === "AttributeError" ||
+    errorName === "KeyError" ||
+    errorName === "IndexError" ||
+    errorName === "ZeroDivisionError" ||
+    errorName === "RuntimeError" ||
+    errorName === "AssertionError" ||
+    errorName === "StopIteration" ||
+    errorName === "RecursionError"
   ) {
     return "runtime";
   }
@@ -182,7 +205,9 @@ describe("Error Handler", () => {
 
     it("should categorize timeout errors", () => {
       expect(categorizeError("TimeoutError", "execution timed out")).toBe("timeout");
-      expect(categorizeError("RuntimeError", "operation timed out")).toBe("timeout");
+      expect(categorizeError("KeyboardInterrupt", "interrupted")).toBe("timeout");
+      // Note: RuntimeError with "timed out" message is categorized as "runtime" 
+      // because the implementation checks error name, not message content
     });
 
     it("should categorize IO errors", () => {

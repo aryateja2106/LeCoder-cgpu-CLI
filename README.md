@@ -118,6 +118,16 @@ lecoder-cgpu --version
 **All Methods:**
 - Google Account required for Colab access
 
+### Google Drive API Setup (Required for Notebook Features)
+
+To use notebook management features (`notebook list`, `notebook create`, `notebook delete`), you need to enable the Google Drive API:
+
+1. Visit: **[Google Drive API Console](https://console.cloud.google.com/apis/api/drive.googleapis.com)**
+2. Click **"ENABLE"** if the API is not already enabled
+3. Wait 1-2 minutes for changes to propagate
+
+This is a one-time setup. Without it, notebook commands will return a "403 Forbidden" error.
+
 ## 🚀 Quick Start (3 Steps)
 
 ### 1️⃣ Install

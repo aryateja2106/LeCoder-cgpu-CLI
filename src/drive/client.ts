@@ -158,6 +158,22 @@ export class DriveClient {
         return this.issueRequest(endpoint, init, schema, retryCount + 1);
       }
       
+      // Handle 403 Forbidden - likely Drive API not enabled
+      if (response.status === 403) {
+        const lowerBody = errorBody.toLowerCase();
+        if (lowerBody.includes("drive api") || lowerBody.includes("accessnotconfigured") || lowerBody.includes("has not been used")) {
+          throw new Error(
+            `Google Drive API is not enabled for your project.\n\n` +
+            `To use notebook features, you need to enable the Google Drive API:\n\n` +
+            `  1. Visit: https://console.cloud.google.com/apis/api/drive.googleapis.com\n` +
+            `  2. Click "ENABLE" to activate the Drive API\n` +
+            `  3. Wait a few minutes for changes to propagate\n` +
+            `  4. Re-authenticate: lecoder-cgpu auth --force\n\n` +
+            `Original error: ${response.status} ${response.statusText}`,
+          );
+        }
+      }
+      
       throw new Error(
         `Drive API error: ${response.status} ${response.statusText}\n${errorBody}`,
       );

@@ -134,7 +134,7 @@ export async function runInteractiveOAuthWizard(
     ),
   );
   const rl = readline.createInterface({ input, output });
-  const totalSteps = 4;
+  const totalSteps = 5;
   try {
     await guideStep(
       rl,
@@ -174,9 +174,20 @@ export async function runInteractiveOAuthWizard(
       ],
     );
 
+    await guideStep(
+      rl,
+      4,
+      totalSteps,
+      "Enable Google Drive API",
+      [
+        `Visit ${chalk.underline("https://console.cloud.google.com/apis/library/drive.googleapis.com")}.`,
+        "Make sure your project is selected at the top.",
+        "Click the \"Enable\" button to activate the Google Drive API.",
+        "This is required for notebook management features (open, save, list notebooks).",
+      ],
+    );
 
-
-  const credentials = await collectClientCredentials(rl, 4, totalSteps);
+  const credentials = await collectClientCredentials(rl, 5, totalSteps);
     await writeConfigFile({
       clientId: credentials.clientId,
       clientSecret: credentials.clientSecret,

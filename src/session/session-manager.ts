@@ -144,6 +144,24 @@ export class SessionManager {
     // No session ID provided, use active session or create new
     const activeSession = await this.storage.getActive();
     if (activeSession) {
+      // Check if requested variant matches active session's variant
+      // If variant is explicitly requested and doesn't match, don't reuse
+      const requestedVariant = params?.variant;
+      if (requestedVariant && activeSession.variant !== requestedVariant) {
+        // User requested a different variant (e.g., --tpu when active is GPU)
+        // Create a new session with the requested variant
+        const logger = getFileLogger();
+        logger?.info("SESSION", "Active session variant mismatch, creating new session", {
+          activeVariant: activeSession.variant,
+          requestedVariant: requestedVariant,
+        });
+        return this.createSession({
+          variant: requestedVariant,
+          forceNew: false,
+          label: params?.label,
+        });
+      }
+      
       try {
         await this.refreshSessionRuntime(activeSession);
         await this.storage.update(activeSession.id, {
@@ -240,8 +258,9 @@ export class SessionManager {
       );
     }
 
-    logger?.logSession("switch", id, { label: session.label });
-    return this.storage.setActive(id);
+    logger?.logSession("switch", session.id, { label: session.label });
+    // Use session.id (full UUID) instead of input id (may be prefix)
+    return this.storage.setActive(session.id);
   }
 
   /**
@@ -265,8 +284,9 @@ export class SessionManager {
       // Ignore errors closing connection
     }
 
-    await this.storage.remove(id);
-    logger?.logSession("close", id, { label: session.label });
+    // Use session.id (full UUID) instead of input id (may be prefix)
+    await this.storage.remove(session.id);
+    logger?.logSession("close", session.id, { label: session.label });
   }
 
   /**
@@ -280,7 +300,8 @@ export class SessionManager {
 
     await this.refreshSessionRuntime(session);
 
-    return this.storage.update(id, {
+    // Use session.id (full UUID) instead of input id (may be prefix)
+    return this.storage.update(session.id, {
       lastUsedAt: new Date().toISOString(),
     });
   }

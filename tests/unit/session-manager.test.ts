@@ -21,6 +21,7 @@ describe("SessionManager", () => {
       update: vi.fn(),
       remove: vi.fn(),
       list: vi.fn().mockResolvedValue([]),
+      setActive: vi.fn(),
     } as unknown as SessionStorage;
 
     mockRuntimeManager = {
@@ -34,6 +35,7 @@ describe("SessionManager", () => {
 
     mockConnectionPool = {
       getStats: vi.fn().mockReturnValue({ limit: 5 }),
+      getConnection: vi.fn().mockReturnValue(null),
     } as unknown as ConnectionPool;
 
     sessionManager = new SessionManager(
@@ -151,13 +153,15 @@ describe("SessionManager", () => {
         label: "Session 1",
         isActive: false,
         variant: Variant.GPU,
-        runtime: { endpoint: "endpoint-1" },
+        runtime: { endpoint: "endpoint-1", proxy: { url: "url", token: "token", tokenExpiresInSeconds: 3600 } },
         lastUsedAt: new Date().toISOString(),
       };
 
       vi.mocked(mockStorage.get).mockResolvedValue(session1 as any);
       vi.mocked(mockStorage.update).mockResolvedValue(undefined);
-      vi.mocked(mockColabClient.refreshConnection).mockResolvedValue(undefined);
+      vi.mocked(mockColabClient.listAssignments).mockResolvedValue([{ endpoint: "endpoint-1" }] as any);
+      vi.mocked(mockColabClient.refreshConnection).mockResolvedValue({ url: "url", token: "newtoken", tokenExpiresInSeconds: 3600 });
+      vi.mocked(mockStorage.setActive).mockResolvedValue(session1 as any);
 
       const result = await sessionManager.switchSession("session-1");
 
@@ -175,12 +179,17 @@ describe("SessionManager", () => {
   describe("session listing", () => {
     it("should return all sessions", async () => {
       const sessions = [
-        { id: "session-1", label: "Session 1", isActive: true },
-        { id: "session-2", label: "Session 2", isActive: false },
-        { id: "session-3", label: "Session 3", isActive: false },
+        { id: "session-1", label: "Session 1", isActive: true, runtime: { endpoint: "ep1" } },
+        { id: "session-2", label: "Session 2", isActive: false, runtime: { endpoint: "ep2" } },
+        { id: "session-3", label: "Session 3", isActive: false, runtime: { endpoint: "ep3" } },
       ];
 
       vi.mocked(mockStorage.list).mockResolvedValue(sessions as any);
+      vi.mocked(mockColabClient.listAssignments).mockResolvedValue([
+        { endpoint: "ep1" },
+        { endpoint: "ep2" },
+        { endpoint: "ep3" },
+      ] as any);
 
       const result = await sessionManager.listSessions();
 
@@ -198,7 +207,7 @@ describe("SessionManager", () => {
   });
 
   describe("session cleanup", () => {
-    it("should close session and remove from storage", async () => {
+    it("should remove session and clean up from storage", async () => {
       const session = {
         id: "session-to-close",
         label: "Session to Close",
@@ -211,15 +220,15 @@ describe("SessionManager", () => {
       vi.mocked(mockStorage.get).mockResolvedValue(session as any);
       vi.mocked(mockStorage.remove).mockResolvedValue(undefined);
 
-      await sessionManager.closeSession("session-to-close");
+      await sessionManager.removeSession("session-to-close");
 
       expect(mockStorage.remove).toHaveBeenCalledWith("session-to-close");
     });
 
-    it("should throw when closing non-existent session", async () => {
+    it("should throw when removing non-existent session", async () => {
       vi.mocked(mockStorage.get).mockResolvedValue(null);
 
-      await expect(sessionManager.closeSession("non-existent")).rejects.toThrow();
+      await expect(sessionManager.removeSession("non-existent")).rejects.toThrow();
     });
   });
 

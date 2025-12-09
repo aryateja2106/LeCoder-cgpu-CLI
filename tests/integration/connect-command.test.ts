@@ -22,7 +22,14 @@ vi.mock("../../src/jupyter/kernel-client.js", () => {
       connect: vi.fn().mockResolvedValue(undefined),
       close: vi.fn(),
       removeAllListeners: vi.fn(),
-      on: vi.fn(),
+      removeListener: vi.fn(),
+      on: vi.fn().mockImplementation(function(event: string, cb: Function) {
+        // Immediately emit "idle" status for the status handler
+        if (event === "status") {
+          setTimeout(() => cb("idle"), 0);
+        }
+        return this;
+      }),
       once: vi.fn(),
       emit: vi.fn(),
       connected: true,
@@ -32,6 +39,10 @@ vi.mock("../../src/jupyter/kernel-client.js", () => {
         executionCount: 1,
       }),
       interrupt: vi.fn().mockResolvedValue(undefined),
+      getKernelInfo: vi.fn().mockResolvedValue({
+        header: { msg_type: "kernel_info_reply" },
+        content: { status: "ok" },
+      }),
     })),
   };
 });

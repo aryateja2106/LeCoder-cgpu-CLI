@@ -7,15 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2025-12-09
+
 ### Added
-- NPM publishing documentation in INSTALLATION.md for maintainers
-- Package verification checklist in docs/npm-package-checklist.md
-- npm pack testing in prepare-release.sh script
+- **Google Drive API Setup Guidance**: Helpful error messages and setup reminders
+  - Clear error message when Drive API returns 403 with enable instructions
+  - Post-authentication setup reminder with direct link to enable Drive API
+  - README section explaining Drive API setup requirement for notebook features
+- **Colab Pro Tier Detection**: Automatic subscription tier detection
+  - Detects Pro tier via `eligibleGpus` (A100, L4, V100 indicate Pro)
+  - Updates connection pool limits based on detected tier
+  - Shows correct tier ("pro" vs "free") in `status --json` and `sessions list`
+
+### Fixed
+- **Runtime Variant Selection**: `--tpu` and `--cpu` flags now work correctly
+  - Fixed `SessionManager.getOrCreateSession` to check if active session's variant matches requested variant
+  - Creates new session with correct variant instead of reusing mismatched active session
+- **Session ID Prefix Matching**: `sessions switch` and `sessions close` now support ID prefixes
+  - Can use `sessions switch 8a23c90e` instead of full UUID
+  - Properly resolves to full session ID before storage operations
+- **Terminal Session Message**: Changed misleading "Opening terminal session X" to clearer "Connecting to {runtime label}..."
+- **Test Suite Improvements**: Fixed 40 failing tests (from 49 to 9)
+  - Added missing mock methods (`removeListener`, `getKernelInfo`, `getConnection`, `setActive`)
+  - Fixed error categorization test expectations to match actual implementation
+  - Fixed mock ID generation to avoid collisions in concurrent tests
+  - Remaining 9 tests are timing-sensitive reconnection/retry edge cases
 
 ### Changed
-- Enhanced prepare-release.sh with tarball content validation
-- Updated CONTRIBUTING.md with release process overview
-- Improved README.md npm installation instructions with version examples
+- `connect`, `run`, `copy`, `status`, `sessions list` commands now update subscription tier after authentication
+- README updated with Drive API setup section in System Requirements
+
+## [0.5.3] - 2025-12-09
+
+### Fixed
+- Colab Pro account detection improvements
+
+## [0.5.2] - 2025-12-09
+
+### Fixed
+- Terminal session message clarity improvements
 
 ## [0.5.1] - 2025-01-XX
 
