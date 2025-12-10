@@ -11,6 +11,7 @@ import chalk from "chalk";
 import { z } from "zod";
 import { FileAuthStorage } from "./session-storage.js";
 import { REQUIRED_SCOPES } from "./constants.js";
+import { isRunningInContainer } from "../utils/environment.js";
 
 interface AuthenticatedSession {
   accessToken: string;
@@ -94,6 +95,20 @@ export class GoogleOAuthManager {
   private async performLogin(options?: LoginOptions): Promise<AuthenticatedSession> {
     const selectAccount = options?.selectAccount ?? false;
     
+    // Warn if running in a container - OAuth callback will fail
+    if (isRunningInContainer()) {
+      console.log(chalk.yellow("\n⚠️  Warning: Running inside a container (Docker/Kubernetes/etc.)"));
+      console.log(chalk.yellow("OAuth login requires browser access and won't work in containers.\n"));
+      console.log(chalk.cyan("To authenticate in containers:"));
+      console.log(chalk.gray("1. On a machine with browser access, run: lecoder-cgpu auth"));
+      console.log(chalk.gray("2. Export session: lecoder-cgpu auth-export --json > session.json"));
+      console.log(chalk.gray("3. Copy both files to the container:"));
+      console.log(chalk.gray("   - config.json (OAuth client credentials)"));
+      console.log(chalk.gray("   - state/session.json (user session token)"));
+      console.log(chalk.gray("4. Or use: lecoder-cgpu auth-import '<session JSON>' --force\n"));
+      console.log(chalk.yellow("Continuing anyway (will likely fail)...\n"));
+    }
+    
     if (selectAccount) {
       console.log(chalk.cyan("Starting OAuth login with account selection..."));
     } else {
@@ -121,7 +136,34 @@ export class GoogleOAuthManager {
     });
     await open(authUrl);
     console.log(chalk.green(`Opened browser for Google login. If it did not open, visit:\n${authUrl}`));
-    const code = await server.waitForCode(state);
+    
+    // Add timeout for OAuth callback with helpful error message
+    const timeoutMs = 300000; // 5 minutes
+    const codePromise = server.waitForCode(state);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error("OAuth login timed out waiting for browser callback"));
+      }, timeoutMs);
+    });
+    
+    let code: string;
+    try {
+      code = await Promise.race([codePromise, timeoutPromise]);
+    } catch (err) {
+      server.dispose();
+      if ((err as Error).message.includes("timed out")) {
+        console.log(chalk.red("\n✗ OAuth login timed out."));
+        if (isRunningInContainer()) {
+          console.log(chalk.yellow("\nThis is expected in containers - the browser callback can't reach 127.0.0.1 inside the container."));
+          console.log(chalk.cyan("\nTo authenticate in containers, copy auth files from a host machine:"));
+          console.log(chalk.gray("  docker cp ~/.config/lecoder-cgpu container:/root/.config/lecoder-cgpu"));
+          console.log(chalk.gray("\nOr use auth-export/auth-import commands (available in next version)."));
+        } else {
+          console.log(chalk.yellow("\nMake sure you completed the Google OAuth flow in your browser."));
+        }
+      }
+      throw err;
+    }
     server.dispose();
     const tokenResponse = await this.client.getToken({
       code,
