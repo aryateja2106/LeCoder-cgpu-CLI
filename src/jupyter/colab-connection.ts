@@ -41,8 +41,9 @@ const DEFAULT_MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_RECONNECT_BASE_DELAY = 1000;
 const DEFAULT_NOTEBOOK_PATH = "/content/lecoder.ipynb";
 const DEFAULT_KERNEL_NAME = "python3";
-const DEFAULT_KERNEL_READY_TIMEOUT = 30000; // 30 seconds
+const DEFAULT_KERNEL_READY_TIMEOUT = 60000; // 60 seconds (increased for slow kernel initialization)
 const DEFAULT_KERNEL_READY_POLL_INTERVAL = 1000; // 1 second
+const DEFAULT_KERNEL_RECONNECT_TIMEOUT = 30000; // 30 seconds for reconnections (faster)
 
 /**
  * Manages Jupyter kernel lifecycle and state for Colab connections
@@ -150,25 +151,31 @@ export class ColabConnection extends EventEmitter {
       throw new Error("Kernel client not connected. Connect WebSocket first.");
     }
 
-    const timeout = this.options.kernelReadyTimeout;
+    // Use longer timeout for initial connection, shorter for reconnections
+    const timeout = this.reconnectAttempts === 0 
+      ? this.options.kernelReadyTimeout 
+      : DEFAULT_KERNEL_RECONNECT_TIMEOUT;
     const startTime = Date.now();
 
     if (process.env.LECODER_CGPU_DEBUG) {
       console.log(
-        `Waiting for kernel ${this.kernelId} to become ready via WebSocket (timeout: ${timeout}ms)`
+        `Waiting for kernel ${this.kernelId} to become ready via WebSocket (timeout: ${timeout}ms, reconnect attempt: ${this.reconnectAttempts})`
       );
     }
 
     return new Promise<void>((resolve, reject) => {
       let resolved = false;
       
-      // Set up timeout
+      // Set up timeout with better error message
       const timeoutId = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           this.kernelClient?.removeListener("status", statusHandler);
+          const elapsed = Date.now() - startTime;
           reject(new Error(
-            `Kernel ${this.kernelId} failed to become ready within ${timeout}ms`
+            `Kernel ${this.kernelId} failed to become ready within ${timeout}ms (elapsed: ${elapsed}ms). ` +
+            `This may indicate the Colab runtime is slow or overloaded. ` +
+            `Try again with --new-runtime to get a fresh runtime, or wait a moment and retry.`
           ));
         }
       }, timeout);
@@ -257,17 +264,47 @@ export class ColabConnection extends EventEmitter {
   }
 
   /**
-   * Create a Jupyter session via REST API
+   * Create a Jupyter session via REST API with retry logic for transient errors
    */
   private async createSession(notebookPathOverride?: string): Promise<Session> {
     const notebookPath = notebookPathOverride ?? this.options.notebookPath;
-    const session = await this.colabClient.createSession(
-      notebookPath,
-      this.options.kernelName,
-      this.currentProxyUrl,
-      this.currentToken
-    );
-    return session;
+    const maxRetries = 3;
+    const baseDelay = 1000; // 1 second
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const session = await this.colabClient.createSession(
+          notebookPath,
+          this.options.kernelName,
+          this.currentProxyUrl,
+          this.currentToken
+        );
+        return session;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const isRetryable = 
+          errorMessage.includes("502") || 
+          errorMessage.includes("Bad Gateway") ||
+          errorMessage.includes("503") ||
+          errorMessage.includes("Service Unavailable") ||
+          errorMessage.includes("504") ||
+          errorMessage.includes("Gateway Timeout");
+        
+        if (isRetryable && attempt < maxRetries - 1) {
+          const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+          if (process.env.LECODER_CGPU_DEBUG) {
+            console.log(`Session creation failed (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+          }
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // Not retryable or max retries reached
+        throw error;
+      }
+    }
+    
+    throw new Error("Failed to create session after retries");
   }
 
   /**
@@ -285,6 +322,7 @@ export class ColabConnection extends EventEmitter {
       wsUrl,
       token: this.currentToken,
       sessionId: this.sessionId,
+      proxyUrl: this.currentProxyUrl, // Pass proxy URL for Origin header
     });
 
     // Setup handlers BEFORE connecting to catch any errors during connection
@@ -346,7 +384,12 @@ export class ColabConnection extends EventEmitter {
 
     if (this.reconnectAttempts >= this.options.maxReconnectAttempts) {
       this.setState(ConnectionState.FAILED);
-      this.emit("error", new Error("Max reconnection attempts exceeded"));
+      const error = new Error(
+        `Max reconnection attempts (${this.options.maxReconnectAttempts}) exceeded. ` +
+        `The kernel connection is unstable. ` +
+        `Try using --new-runtime to get a fresh runtime, or check if the Colab runtime is available.`
+      );
+      this.emit("error", error);
       return;
     }
 

@@ -20,12 +20,17 @@ import {
   ExecuteReplyContentSchema,
   StatusContentSchema,
 } from "./protocol.js";
+import {
+  COLAB_RUNTIME_PROXY_TOKEN_HEADER,
+  COLAB_CLIENT_AGENT_HEADER,
+} from "../colab/headers.js";
 
 export interface KernelClientOptions {
   kernelId: string;
   wsUrl: string;
   token: string;
   sessionId?: string;
+  proxyUrl?: string; // Proxy URL for Origin header
 }
 
 export interface KernelClientEvents {
@@ -45,6 +50,7 @@ export class JupyterKernelClient extends EventEmitter {
   private readonly wsUrl: string;
   private readonly token: string;
   private readonly sessionId: string;
+  private readonly proxyUrl: string | undefined;
   private isConnected: boolean = false;
   private messageQueue: string[] = [];
 
@@ -54,6 +60,7 @@ export class JupyterKernelClient extends EventEmitter {
     this.wsUrl = options.wsUrl;
     this.token = options.token;
     this.sessionId = options.sessionId || randomUUID();
+    this.proxyUrl = options.proxyUrl;
   }
 
   /**
@@ -63,11 +70,24 @@ export class JupyterKernelClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       const wsEndpoint = `${this.wsUrl}/api/kernels/${this.kernelId}/channels`;
       
-      // Add runtime proxy token as query parameter
+      // Add runtime proxy token and authuser as query parameters
       const url = new URL(wsEndpoint);
       url.searchParams.set("token", this.token);
+      url.searchParams.set("authuser", "0");
 
-      this.ws = new WebSocket(url.toString());
+      // Build headers for authentication (required by Colab runtime proxy)
+      const headers: Record<string, string> = {
+        [COLAB_RUNTIME_PROXY_TOKEN_HEADER.key]: this.token,
+        [COLAB_CLIENT_AGENT_HEADER.key]: COLAB_CLIENT_AGENT_HEADER.value,
+      };
+
+      // Add Origin header if proxy URL is provided
+      if (this.proxyUrl) {
+        const origin = new URL(this.proxyUrl).origin;
+        headers.Origin = origin;
+      }
+
+      this.ws = new WebSocket(url.toString(), { headers });
 
       this.ws.on("open", () => {
         this.isConnected = true;
@@ -96,8 +116,38 @@ export class JupyterKernelClient extends EventEmitter {
       });
 
       this.ws.on("error", (error) => {
-        this.emit("error", error);
-        reject(error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        // Provide more helpful error messages for common issues
+        let enhancedError: Error;
+        
+        if (errorMessage.includes("404") || errorMessage.includes("Not Found")) {
+          enhancedError = new Error(
+            `WebSocket connection failed (404): Kernel endpoint not found. ` +
+            `This usually means: ` +
+            `1) The kernel ID is invalid or the kernel was deleted, ` +
+            `2) The runtime proxy URL is incorrect, ` +
+            `3) Authentication headers are missing or invalid. ` +
+            `Try using --new-runtime to get a fresh kernel.`
+          );
+        } else if (errorMessage.includes("401") || errorMessage.includes("403")) {
+          enhancedError = new Error(
+            `WebSocket connection failed (${errorMessage.includes("401") ? "401" : "403"}): Authentication failed. ` +
+            `The runtime proxy token may have expired. ` +
+            `Try re-authenticating or using --new-runtime.`
+          );
+        } else if (errorMessage.includes("ECONNREFUSED") || errorMessage.includes("ENOTFOUND")) {
+          enhancedError = new Error(
+            `WebSocket connection failed: Cannot reach Colab runtime. ` +
+            `This may indicate network issues or the runtime is unavailable. ` +
+            `Check your internet connection and try again with --new-runtime.`
+          );
+        } else {
+          enhancedError = new Error(`WebSocket connection error: ${errorMessage}`);
+        }
+        
+        enhancedError.cause = error;
+        this.emit("error", enhancedError);
+        reject(enhancedError);
       });
 
       this.ws.on("close", (code, reason) => {
@@ -172,6 +222,11 @@ export class JupyterKernelClient extends EventEmitter {
     const request = createExecuteRequest(code, this.sessionId, options);
     const msg_id = request.header.msg_id;
 
+    // Output size limits (1MB for stdout/stderr each)
+    const MAX_OUTPUT_SIZE = 1024 * 1024; // 1MB
+    let outputSize = 0;
+    let outputTruncated = false;
+
     return new Promise((resolve, reject) => {
       const timeout = options.timeout_ms || 300000; // 5 minute default
       let timeoutHandle: NodeJS.Timeout | null = null;
@@ -216,6 +271,14 @@ export class JupyterKernelClient extends EventEmitter {
                 duration_ms: completed.getTime() - started.getTime(),
               };
               
+              // Add truncation warning if output was truncated
+              if (outputTruncated) {
+                if (!result.stderr) {
+                  result.stderr = "";
+                }
+                result.stderr += `\n[Output truncated: exceeded ${MAX_OUTPUT_SIZE / 1024}KB limit]\n`;
+              }
+              
               cleanup();
               resolve(result);
               break;
@@ -223,10 +286,30 @@ export class JupyterKernelClient extends EventEmitter {
 
             case MessageType.STREAM: {
               const content = StreamContentSchema.parse(message.content);
+              const text = content.text || "";
+              
+              // Check output size limits
+              if (outputSize + text.length > MAX_OUTPUT_SIZE) {
+                outputTruncated = true;
+                const remaining = MAX_OUTPUT_SIZE - outputSize;
+                if (remaining > 0) {
+                  if (content.name === "stdout") {
+                    result.stdout += text.substring(0, remaining);
+                  } else if (content.name === "stderr") {
+                    result.stderr += text.substring(0, remaining);
+                  }
+                  outputSize = MAX_OUTPUT_SIZE;
+                }
+                // Stop collecting more output
+                break;
+              }
+              
               if (content.name === "stdout") {
-                result.stdout += content.text;
+                result.stdout += text;
+                outputSize += text.length;
               } else if (content.name === "stderr") {
-                result.stderr += content.text;
+                result.stderr += text;
+                outputSize += text.length;
               }
               break;
             }
@@ -264,10 +347,17 @@ export class JupyterKernelClient extends EventEmitter {
 
       this.on("message", messageHandler);
 
-      // Set timeout
+      // Set timeout with better error message
       timeoutHandle = setTimeout(() => {
         cleanup();
-        reject(new Error(`Execution timed out after ${timeout}ms`));
+        const elapsed = Date.now() - started.getTime();
+        reject(new Error(
+          `Execution timed out after ${timeout}ms (elapsed: ${elapsed}ms). ` +
+          `The code may be taking too long to execute. Consider: ` +
+          `1) Breaking it into smaller chunks, ` +
+          `2) Adding progress indicators, ` +
+          `3) Using a longer timeout with --timeout option.`
+        ));
       }, timeout);
 
       // Send execute request
