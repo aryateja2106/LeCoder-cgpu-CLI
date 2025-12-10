@@ -41,9 +41,7 @@ import { SessionStorage } from "./session/session-storage.js";
 import { SessionManager, type EnrichedSession, type SessionStats } from "./session/session-manager.js";
 import { ConnectionPool } from "./jupyter/connection-pool.js";
 import { initFileLogger, LogLevel } from "./utils/file-logger.js";
-
-// Modular command handlers are available in ./commands/ but not yet integrated
-// TODO: Refactor command actions to use these handlers to reduce cognitive complexity
+import { handleSessionsList, switchSession, deleteSession, cleanStaleSessions } from "./commands/sessions-handlers.js";
 
 // Prevent EPIPE errors when piping output (e.g. to head/tail)
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {
@@ -127,9 +125,9 @@ async function createApp(configPath?: string) {
   });
   logger.info("CLI", "Application started", { configPath, storageDir: config.storageDir });
   
-  const storage = new FileAuthStorage(config.storageDir);
+  const authStorage = new FileAuthStorage(config.storageDir);
   const oauthClient = new OAuth2Client(config.clientId, config.clientSecret);
-  const auth = new GoogleOAuthManager(oauthClient, storage);
+  const auth = new GoogleOAuthManager(oauthClient, authStorage);
   const colabClient = new ColabClient(
     new URL(config.colabApiDomain),
     new URL(config.colabGapiDomain),
@@ -141,7 +139,7 @@ async function createApp(configPath?: string) {
   const connectionPool = ConnectionPool.getInstance();
   const runtimeManager = new RuntimeManager(colabClient);
   const sessionManager = new SessionManager(sessionStorage, runtimeManager, colabClient, connectionPool);
-  return { auth, colabClient, driveClient, notebookManager, config, sessionManager, runtimeManager, connectionPool, logger };
+  return { auth, authStorage, colabClient, driveClient, notebookManager, config, sessionManager, runtimeManager, connectionPool, logger };
 }
 
 // Get package version dynamically
@@ -298,9 +296,34 @@ program
             }
           });
         } catch (connError) {
-          // Handle connection errors (WebSocket 404, kernel not found, etc.)
+          // Handle connection errors (WebSocket 404, kernel not found, timeout, etc.)
           const errorMessage = connError instanceof Error ? connError.message : String(connError);
           const isNotFound = errorMessage.includes("404") || errorMessage.includes("not found");
+          const isTimeout = errorMessage.includes("timeout") || errorMessage.includes("timed out") || 
+                           errorMessage.includes("failed to become ready") ||
+                           errorMessage.includes("Max reconnection attempts");
+          const isAuthError = errorMessage.includes("401") || errorMessage.includes("403") || 
+                             errorMessage.includes("Authentication");
+          const isBadGateway = errorMessage.includes("502") || errorMessage.includes("Bad Gateway") ||
+                              errorMessage.includes("503") || errorMessage.includes("Service Unavailable");
+          
+          // Determine error category and code
+          let errorCode = ErrorCode.IO_ERROR;
+          let errorName = "ConnectionError";
+          
+          if (isTimeout) {
+            errorCode = ErrorCode.TIMEOUT_ERROR;
+            errorName = "KernelTimeout";
+          } else if (isBadGateway) {
+            errorCode = ErrorCode.IO_ERROR;
+            errorName = "ServiceUnavailable";
+          } else if (isNotFound) {
+            errorCode = ErrorCode.IO_ERROR;
+            errorName = "KernelNotFound";
+          } else if (isAuthError) {
+            errorCode = ErrorCode.IO_ERROR;
+            errorName = "AuthenticationError";
+          }
           
           const result: ExecutionResult = {
             status: ReplyStatus.ERROR,
@@ -310,7 +333,7 @@ program
             display_data: [],
             execution_count: null,
             error: {
-              ename: isNotFound ? "KernelNotFound" : "ConnectionError",
+              ename: errorName,
               evalue: errorMessage,
               traceback: [],
             },
@@ -322,7 +345,7 @@ program
             commandString,
             "kernel",
             { label: runtime.label, accelerator: runtime.accelerator },
-            ErrorCode.IO_ERROR
+            errorCode
           );
           await historyStorage.append(entry);
           
@@ -331,9 +354,25 @@ program
             console.log(jsonOutput);
           } else {
             console.error(chalk.red(`Connection error: ${errorMessage}`));
-            if (isNotFound) {
+            
+            // Provide specific suggestions based on error type
+            if (isTimeout) {
+              console.log(chalk.gray("Tip: Kernel initialization is taking longer than expected."));
+              console.log(chalk.gray("  - Try again with --new-runtime to get a fresh runtime"));
+              console.log(chalk.gray("  - Wait a moment and retry (runtime may be initializing)"));
+              console.log(chalk.gray("  - Check Colab status at https://colab.research.google.com/"));
+            } else if (isBadGateway) {
+              console.log(chalk.gray("Tip: Colab runtime is temporarily unavailable (502/503 error)."));
+              console.log(chalk.gray("  - Wait 10-30 seconds and retry"));
+              console.log(chalk.gray("  - Try with --new-runtime to get a different runtime"));
+              console.log(chalk.gray("  - Reduce request frequency (avoid rapid successive calls)"));
+            } else if (isNotFound) {
               console.log(chalk.gray("Tip: Try using --new-runtime to request a fresh GPU runtime."));
               console.log(chalk.gray("Or run 'lecoder-cgpu sessions clean' to remove stale sessions."));
+            } else if (isAuthError) {
+              console.log(chalk.gray("Tip: Authentication failed. Try:"));
+              console.log(chalk.gray("  - lecoder-cgpu auth --force (re-authenticate)"));
+              console.log(chalk.gray("  - lecoder-cgpu run --new-runtime (get fresh runtime)"));
             }
           }
           
@@ -357,7 +396,12 @@ program
           // Output result
           if (jsonMode) {
             const jsonOutput = OutputFormatter.formatExecutionResult(result, { json: true });
+            // Ensure output is flushed to stdout
             console.log(jsonOutput);
+            // Force flush stdout to prevent empty output issues
+            if (process.stdout.isTTY) {
+              process.stdout.write("");
+            }
           } else {
             displayExecutionResult(result, false);
           }
@@ -818,6 +862,198 @@ program
       // Validate credentials if requested
       if (options.validate) {
         await validateCredentials(colabClient);
+      }
+    });
+  });
+
+program
+  .command("auth-export")
+  .description("Export session token for use in headless/container environments")
+  .option("--json", "Output as JSON for programmatic use")
+  .action(async (options, cmd) => {
+    const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
+    
+    await withApp(globalOptions, async ({ auth, authStorage }) => {
+      const session = await auth.checkExistingSession();
+      
+      if (!session) {
+        if (options.json) {
+          console.log(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message: "Not authenticated. Run 'lecoder-cgpu auth' first." }
+          }, null, 2));
+        } else {
+          console.log(chalk.red("Not authenticated. Run 'lecoder-cgpu auth' first."));
+        }
+        process.exit(1);
+        return;
+      }
+
+      // Get the stored session with refresh token
+      const storedSession = await authStorage.getSession();
+      if (!storedSession) {
+        if (options.json) {
+          console.log(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message: "Session file not found." }
+          }, null, 2));
+        } else {
+          console.log(chalk.red("Session file not found."));
+        }
+        process.exit(1);
+        return;
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify({
+          status: "ok",
+          session: storedSession,
+          instructions: "Use 'lecoder-cgpu auth-import' to import this session on another machine"
+        }, null, 2));
+      } else {
+        console.log(chalk.cyan("Session Token Export"));
+        console.log(chalk.gray("─".repeat(50)));
+        console.log(chalk.yellow("\n⚠️  Keep this token secret! It grants access to your Colab account.\n"));
+        console.log(chalk.bold("Copy this entire JSON object:"));
+        console.log();
+        console.log(JSON.stringify(storedSession, null, 2));
+        console.log();
+        console.log(chalk.gray("To import on another machine or container:"));
+        console.log(chalk.cyan("  lecoder-cgpu auth-import '<paste JSON here>'"));
+        console.log();
+        console.log(chalk.gray("Or pipe from a file:"));
+        console.log(chalk.cyan("  cat session.json | lecoder-cgpu auth-import -"));
+      }
+    });
+  });
+
+program
+  .command("auth-import")
+  .description("Import session token for headless/container environments")
+  .argument("[token]", "Session token JSON (or '-' to read from stdin)")
+  .option("--json", "Output as JSON for programmatic use")
+  .option("-f, --force", "Overwrite existing session without confirmation")
+  .action(async (tokenArg: string | undefined, options, cmd) => {
+    const globalOptions = (cmd.parent?.opts() as GlobalOptions) ?? {};
+    
+    let tokenJson: string;
+    
+    // Read token from argument or stdin
+    if (!tokenArg || tokenArg === "-") {
+      // Read from stdin
+      if (process.stdin.isTTY && !tokenArg) {
+        if (options.json) {
+          console.log(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message: "No token provided. Pass token as argument or pipe from stdin." }
+          }, null, 2));
+        } else {
+          console.log(chalk.red("No token provided."));
+          console.log(chalk.gray("Usage: lecoder-cgpu auth-import '<session JSON>'"));
+          console.log(chalk.gray("   or: cat session.json | lecoder-cgpu auth-import -"));
+        }
+        process.exit(1);
+        return;
+      }
+      
+      // Read from stdin
+      const chunks: string[] = [];
+      for await (const chunk of process.stdin) {
+        chunks.push(String(chunk));
+      }
+      tokenJson = chunks.join("").trim();
+    } else {
+      tokenJson = tokenArg;
+    }
+    
+    // Parse and validate the token
+    let session: {
+      id: string;
+      refreshToken: string;
+      scopes: string[];
+      account: { id: string; label: string };
+    };
+    
+    try {
+      session = JSON.parse(tokenJson);
+      
+      // Validate required fields
+      if (!session.id || !session.refreshToken || !session.scopes || !session.account) {
+        throw new Error("Missing required fields");
+      }
+      if (!session.account.id || !session.account.label) {
+        throw new Error("Invalid account object");
+      }
+    } catch (err) {
+      if (options.json) {
+        console.log(JSON.stringify({
+          status: "error",
+          errorCode: 1,
+          error: { message: `Invalid session JSON: ${(err as Error).message}` }
+        }, null, 2));
+      } else {
+        console.log(chalk.red(`Invalid session JSON: ${(err as Error).message}`));
+        console.log(chalk.gray("Expected format: { id, refreshToken, scopes, account: { id, label } }"));
+      }
+      process.exit(1);
+      return;
+    }
+    
+    await withApp(globalOptions, async ({ auth, authStorage }) => {
+      // Check for existing session
+      const existingSession = await auth.checkExistingSession();
+      
+      if (existingSession && !options.force) {
+        if (process.stdin.isTTY && !options.json) {
+          console.log(chalk.yellow(`Currently authenticated as ${existingSession.account.label} <${existingSession.account.id}>`));
+          
+          const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          
+          try {
+            const answer = await new Promise<string>((resolve) => {
+              rl.question("Replace with imported session? (y/N): ", resolve);
+            });
+            
+            if (!/^y(es)?$/i.test(answer)) {
+              console.log(chalk.gray("Import cancelled."));
+              return;
+            }
+          } finally {
+            rl.close();
+          }
+        } else if (!options.force) {
+          if (options.json) {
+            console.log(JSON.stringify({
+              status: "error",
+              errorCode: 1,
+              error: { message: "Session already exists. Use --force to overwrite." }
+            }, null, 2));
+          } else {
+            console.log(chalk.red("Session already exists. Use --force to overwrite."));
+          }
+          process.exit(1);
+          return;
+        }
+      }
+      
+      // Store the imported session
+      await authStorage.storeSession(session);
+      
+      if (options.json) {
+        console.log(JSON.stringify({
+          status: "ok",
+          account: session.account,
+          message: "Session imported successfully"
+        }, null, 2));
+      } else {
+        console.log(chalk.green(`✓ Session imported for ${session.account.label} <${session.account.id}>`));
+        console.log(chalk.gray("Run 'lecoder-cgpu status' to verify."));
       }
     });
   });
@@ -1345,69 +1581,7 @@ sessionsCmd
         );
       }
       
-      if (options.stats) {
-        const stats = await sessionManager.getStats();
-        if (jsonMode) {
-          console.log(JSON.stringify(stats, null, 2));
-        } else {
-          console.log(chalk.bold("Session Statistics"));
-          console.log(chalk.gray("─".repeat(50)));
-          console.log(`Total sessions: ${stats.totalSessions}`);
-          console.log(`${chalk.green("●")} Active: ${stats.activeSessions}`);
-          console.log(`${chalk.blue("●")} Connected: ${stats.connectedSessions}`);
-          console.log(`${chalk.red("●")} Stale: ${stats.staleSessions}`);
-          console.log(`Max sessions: ${stats.maxSessions} (${stats.tier} tier)`);
-        }
-        return;
-      }
-      
-      const sessions = await sessionManager.listSessions();
-      
-      if (jsonMode) {
-        console.log(JSON.stringify(sessions, null, 2));
-      } else {
-        if (sessions.length === 0) {
-          console.log(chalk.gray("\nNo active sessions"));
-          console.log(chalk.gray("Run 'lecoder-cgpu connect' to create a new session"));
-          return;
-        }
-        
-        console.log(chalk.bold(`\nActive Sessions (${sessions.length}):`));
-        console.log(chalk.gray("─".repeat(100)));
-        
-        for (const sess of sessions) {
-          const idShort = sess.id.substring(0, 8);
-          const activeMarker = sess.isActive ? chalk.green("* ") : "  ";
-          
-          let statusColor: typeof chalk.green;
-          if (sess.status === "connected") {
-            statusColor = chalk.green;
-          } else if (sess.status === "active") {
-            statusColor = chalk.blue;
-          } else if (sess.status === "stale") {
-            statusColor = chalk.red;
-          } else {
-            statusColor = chalk.gray;
-          }
-          
-          const createdAgo = formatRelativeTime(new Date(sess.createdAt));
-          const lastUsedAgo = formatRelativeTime(new Date(sess.lastUsedAt));
-          
-          console.log(`${activeMarker}${chalk.bold(idShort)} ${sess.label}`);
-          console.log(`  Variant: ${sess.variant.toUpperCase()} | Accelerator: ${sess.runtime.accelerator}`);
-          console.log(`  Status: ${statusColor(sess.status.toUpperCase())}`);
-          if (sess.kernelState) {
-            console.log(`  Kernel: ${sess.kernelState}`);
-          }
-          console.log(`  Created: ${createdAgo} | Last used: ${lastUsedAgo}`);
-          console.log("");
-        }
-        
-        const activeSession = sessions.find(s => s.isActive);
-        if (activeSession) {
-          console.log(chalk.gray(`Active session: ${activeSession.id.substring(0, 8)}`));
-        }
-      }
+      await handleSessionsList(sessionManager, options, formatRelativeTime);
     });
   });
 
@@ -1415,30 +1589,47 @@ sessionsCmd
   .command("switch")
   .description("Switch to a different Colab runtime session")
   .argument("[session-id]", "Session ID to switch to (defaults to --session flag)")
-  .action(async (sessionId: string | undefined, cmd) => {
+  .option("--json", "Output as JSON")
+  .action(async (sessionId: string | undefined, options, cmd) => {
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
     const targetSessionId = sessionId ?? globalOptions.session;
+    const jsonMode = Boolean(options?.json);
 
     if (!targetSessionId) {
-      console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      if (jsonMode) {
+        console.error(JSON.stringify({
+          status: "error",
+          errorCode: 1,
+          error: { message: "Session ID is required. Provide it as an argument or via --session." }
+        }, null, 2));
+      } else {
+        console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      }
       process.exit(1);
     }
     
     await withApp(globalOptions, async ({ auth, sessionManager }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
-      console.log(
-        chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
-        ),
-      );
       
-      try {
-        const switched = await sessionManager.switchSession(targetSessionId);
-        console.log(chalk.green(`\n✓ Switched to session ${switched.id.substring(0, 8)}`));
-        console.log(chalk.gray(`  ${switched.label}`));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`\n✗ ${message}`));
+      if (!jsonMode) {
+        console.log(
+          chalk.green(
+            `Authenticated as ${session.account.label} <${session.account.id}>`,
+          ),
+        );
+      }
+      
+      const result = await switchSession(sessionManager, targetSessionId, jsonMode);
+      if ("error" in result) {
+        if (jsonMode) {
+          console.error(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message: result.error }
+          }, null, 2));
+        } else {
+          console.error(chalk.red(`\n✗ ${result.error}`));
+        }
         process.exit(1);
       }
     });
@@ -1448,29 +1639,47 @@ sessionsCmd
   .command("close")
   .description("Close a specific session")
   .argument("[session-id]", "Session ID to close (defaults to --session flag)")
-  .action(async (sessionId: string | undefined, cmd) => {
+  .option("--json", "Output as JSON")
+  .action(async (sessionId: string | undefined, options, cmd) => {
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
     const targetSessionId = sessionId ?? globalOptions.session;
+    const jsonMode = Boolean(options?.json);
 
     if (!targetSessionId) {
-      console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      if (jsonMode) {
+        console.error(JSON.stringify({
+          status: "error",
+          errorCode: 1,
+          error: { message: "Session ID is required. Provide it as an argument or via --session." }
+        }, null, 2));
+      } else {
+        console.error(chalk.red("Session ID is required. Provide it as an argument or via --session."));
+      }
       process.exit(1);
     }
     
     await withApp(globalOptions, async ({ auth, sessionManager }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
-      console.log(
-        chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
-        ),
-      );
       
-      try {
-        await sessionManager.removeSession(targetSessionId);
-        console.log(chalk.green(`\n✓ Closed session ${targetSessionId.substring(0, 8)}`));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`\n✗ ${message}`));
+      if (!jsonMode) {
+        console.log(
+          chalk.green(
+            `Authenticated as ${session.account.label} <${session.account.id}>`,
+          ),
+        );
+      }
+      
+      const result = await deleteSession(sessionManager, targetSessionId, jsonMode);
+      if ("error" in result) {
+        if (jsonMode) {
+          console.error(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message: result.error }
+          }, null, 2));
+        } else {
+          console.error(chalk.red(`\n✗ ${result.error}`));
+        }
         process.exit(1);
       }
     });
@@ -1479,35 +1688,55 @@ sessionsCmd
 sessionsCmd
   .command("clean")
   .description("Remove stale sessions (runtimes no longer assigned)")
-  .action(async (cmd) => {
+  .option("--json", "Output as JSON")
+  .action(async (options, cmd) => {
     const globalOptions = (cmd.parent?.parent?.opts() as GlobalOptions) ?? {};
+    const jsonMode = Boolean(options.json);
     
     await withApp(globalOptions, async ({ auth, sessionManager }) => {
       const session = await auth.getAccessToken(globalOptions.forceLogin);
-      console.log(
-        chalk.green(
-          `Authenticated as ${session.account.label} <${session.account.id}>`,
-        ),
-      );
       
-      const spinner = ora("Cleaning stale sessions...").start();
+      if (!jsonMode) {
+        console.log(
+          chalk.green(
+            `Authenticated as ${session.account.label} <${session.account.id}>`,
+          ),
+        );
+      }
       
-      try {
-        const removed = await sessionManager.cleanStaleSessions();
+      if (!jsonMode) {
+        const spinner = ora("Cleaning stale sessions...").start();
         
-        if (removed.length === 0) {
-          spinner.succeed("No stale sessions found");
-        } else {
-          spinner.succeed(`Removed ${removed.length} stale session(s)`);
-          for (const id of removed) {
-            console.log(chalk.gray(`  ${id.substring(0, 8)}`));
+        try {
+          const removed = await sessionManager.cleanStaleSessions();
+          
+          if (removed.length === 0) {
+            spinner.succeed("No stale sessions found");
+          } else {
+            spinner.succeed(`Removed ${removed.length} stale session(s)`);
+            for (const id of removed) {
+              console.log(chalk.gray(`  ${id.substring(0, 8)}`));
+            }
           }
+        } catch (error) {
+          spinner.fail("Failed to clean sessions");
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(chalk.red(`\n${message}`));
+          process.exit(1);
         }
-      } catch (error) {
-        spinner.fail("Failed to clean sessions");
-        const message = error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`\n${message}`));
-        process.exit(1);
+      } else {
+        // JSON mode - use handler
+        try {
+          await cleanStaleSessions(sessionManager, jsonMode);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(JSON.stringify({
+            status: "error",
+            errorCode: 1,
+            error: { message }
+          }, null, 2));
+          process.exit(1);
+        }
       }
     });
   });
