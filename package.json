@@ -83,7 +83,7 @@
     "tsx": "^4.20.6",
     "typescript": "5.4.3",
     "uuid": "^13.0.0",
-    "vitest": "^1.6.1"
+    "vitest": "^4.0.15"
   },
   "pkg": {
     "scripts": "dist/**/*.js",
